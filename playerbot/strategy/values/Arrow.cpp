@@ -17,7 +17,7 @@ WorldLocation ArrowFormation::GetLocationInternal()
     float offset = 0;
     float range = ai->GetRange("follow");
 
-    Unit* followTarget = AI_VALUE(Unit*, "follow target");
+    Unit* followTarget = ai->GetUnit(AI_VALUE(ObjectGuid, "follow target"));
     if (!ai->IsSafe(followTarget))
         return Formation::NullLocation;
 
@@ -48,11 +48,16 @@ WorldLocation ArrowFormation::GetLocationInternal()
 
     float ox, oy, oz;
     followTarget->GetPosition(ox, oy, oz);
+    if (std::isfinite(ox) && std::isfinite(oy) && std::isfinite(oz) && std::isfinite(x) && std::isfinite(y) && std::isfinite(z))
+    {
 #ifdef MANGOSBOT_TWO
-    followTarget->GetMap()->GetHitPosition(ox, oy, oz + bot->GetCollisionHeight(), x, y, z, bot->GetPhaseMask(), -0.5f);
+        followTarget->GetMap()->GetHitPosition(ox, oy, oz + bot->GetCollisionHeight(), x, y, z, bot->GetPhaseMask(), -0.5f);
 #else
-    followTarget->GetMap()->GetHitPosition(ox, oy, oz + bot->GetCollisionHeight(), x, y, z, -0.5f);
+        followTarget->GetMap()->GetHitPosition(ox, oy, oz + bot->GetCollisionHeight(), x, y, z, -0.5f);
 #endif
+    }
+    else
+        WorldPosition::logNonFinite("Arrow::GetHitPosition", WorldPosition(followTarget->GetMapId(), ox, oy, oz), nullptr);
 
     if (!bot->IsFlying() && !bot->IsFreeFlying() && !bot->IsSwimming())
     {
@@ -88,7 +93,7 @@ FormationSlot* ArrowFormation::FindSlot(Player* member)
 
 void ArrowFormation::FillSlotsExceptMaster()
 {
-    Unit* followTarget = AI_VALUE(Unit*, "follow target");
+    Unit* followTarget = ai->GetUnit(AI_VALUE(ObjectGuid, "follow target"));
     Group* group = bot->GetGroup();
     GroupReference *gref = group->GetFirstMember();
     uint32 index = 0;
@@ -109,7 +114,7 @@ void ArrowFormation::FillSlotsExceptMaster()
 
 void ArrowFormation::AddMasterToSlot()
 {
-    Unit* followTarget = AI_VALUE(Unit*, "follow target");
+    Unit* followTarget = ai->GetUnit(AI_VALUE(ObjectGuid, "follow target"));
     Group* group = bot->GetGroup();
     GroupReference *gref = group->GetFirstMember();
     uint32 index = 0;

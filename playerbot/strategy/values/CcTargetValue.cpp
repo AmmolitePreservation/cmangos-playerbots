@@ -24,16 +24,16 @@ public:
 
         AiObjectContext* context = ai->GetAiObjectContext();
 
-        if (AI_VALUE(Unit*,"rti cc target") && AI_VALUE(Unit*,"rti cc target")->GetObjectGuid() == creature->GetObjectGuid())
+        if (ai->GetUnit(AI_VALUE(ObjectGuid,"rti cc target")) && ai->GetUnit(AI_VALUE(ObjectGuid,"rti cc target"))->GetObjectGuid() == creature->GetObjectGuid())
         {
             result = creature;
             return;
         }
 
-        if (AI_VALUE(Unit*,"current target") == creature)
+        if (AI_VALUE(ObjectGuid,"current target") == creature->GetObjectGuid())
             return;
 
-        if (AI_VALUE(Unit*,"rti target") == creature)
+        if (AI_VALUE(ObjectGuid,"rti target") == creature->GetObjectGuid())
             return;
 
         uint8 health = creature->GetHealthPercent();
@@ -58,7 +58,7 @@ public:
         if (!ai->CanCastSpell(spell, creature, true, nullptr, false, true))
             return;
 
-        // If we have rti cc none but have cc strategy, then we'll cc something we're able to
+        // If we have rti cc none but have cc strategy, then we'll cc something that isn't occupied
         std::string rti = AI_VALUE(std::string, "rti cc");
         int index = RtiTargetValue::GetRtiIndex(rti);
         if (index == -1 && ai->HasStrategy("cc", BotState::BOT_STATE_COMBAT))
@@ -70,6 +70,21 @@ public:
                 if(!member || !sServerFacade.IsAlive(member) || member == bot || bot->GetMapId() != member->GetMapId())
                     continue;
 
+                PlayerbotAI* memberAI = member->GetPlayerbotAI();
+                bool isBot = member->IsPlayer() && memberAI;
+                if (isBot)
+                {
+                    AiObjectContext* context = memberAI->GetAiObjectContext();
+                    // If someone else has this target as their current target, don't cc
+                    if (context && context->GetValue<ObjectGuid>("current target")->Get() == creature->GetObjectGuid())
+                        return;
+                }
+                else
+                {
+                    // If member is not a bot, check if they are targeting this
+                    if (member->GetSelectionGuid() == creature->GetObjectGuid())
+                        return;
+                }
                 if (!ai->IsTank(member))
                     continue;
 
@@ -91,7 +106,7 @@ private:
     float maxDistance;
 };
 
-Unit* CcTargetValue::Calculate()
+ObjectGuid CcTargetValue::Calculate()
 {
     std::list<ObjectGuid> possible = AI_VALUE(std::list<ObjectGuid>,"possible targets no los");
 
@@ -106,17 +121,18 @@ Unit* CcTargetValue::Calculate()
             continue;
 
         if (ai->HasMyAura(qualifier, add))
-            return NULL;
+            return ObjectGuid();
 
         if (qualifier == "polymorph")
         {
             if (ai->HasMyAura("polymorph: pig", add))
-                return NULL;
+                return ObjectGuid();
             if (ai->HasMyAura("polymorph: turtle", add))
-                return NULL;
+                return ObjectGuid();
         }
     }
 
     FindTargetForCcStrategy strategy(ai, qualifier);
-    return FindTarget(&strategy);
+    Unit* target = FindTarget(&strategy);
+    return target ? target->GetObjectGuid() : ObjectGuid();
 }

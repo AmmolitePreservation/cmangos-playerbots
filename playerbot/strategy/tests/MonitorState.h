@@ -35,6 +35,13 @@ namespace ai
         std::string GetName() const override { return "group size"; }
     };
 
+    class MonitorStateGroupOnMap : public TestMonitor
+    {
+    private:
+        bool IsConditionMet(const std::string& monitorStr, Player* bot, TestContext& ctx) const override;
+        std::string GetName() const override { return "group on map"; }
+    };
+
     class MonitorStateLootGuid : public TestMonitor
     {
     private:
@@ -47,6 +54,13 @@ namespace ai
     private:
         bool IsConditionMet(const std::string& monitorStr, Player* bot, TestContext& ctx) const override;
         std::string GetName() const override { return "starter gear count"; }
+    };
+
+    class MonitorStateEquippedCount : public TestMonitor
+    {
+    private:
+        bool IsConditionMet(const std::string& monitorStr, Player* bot, TestContext& ctx) const override;
+        std::string GetName() const override { return "equipped count"; }
     };
 
     class MonitorStateEquipQuality : public TestMonitor
@@ -68,6 +82,20 @@ namespace ai
     private:
         bool IsConditionMet(const std::string& monitorStr, Player* bot, TestContext& ctx) const override;
         std::string GetName() const override { return "value"; }
+    };
+
+    class MonitorStateLootStackNever : public TestMonitor
+    {
+    private:
+        bool IsConditionMet(const std::string& monitorStr, Player* bot, TestContext& ctx) const override;
+        std::string GetName() const override { return "loot stack"; }
+    };
+
+    class MonitorStateActionSpam : public TestMonitor
+    {
+    private:
+        bool IsConditionMet(const std::string& monitorStr, Player* bot, TestContext& ctx) const override;
+        std::string GetName() const override { return "action spam"; }
     };
 
     class MonitorOutgoingMessage : public TestMonitor

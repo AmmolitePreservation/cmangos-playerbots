@@ -99,7 +99,7 @@ namespace ai
             }
             else if (ai->HasStrategy("totem fire resistance", BotState::BOT_STATE_COMBAT))
             {
-                return !AI_VALUE2(bool, "has totem", "fire resistance totem");
+                return !AI_VALUE2(bool, "has totem", "frost resistance totem");
             }
             else if (ai->HasStrategy("totem fire magma", BotState::BOT_STATE_COMBAT))
             {
@@ -315,7 +315,7 @@ namespace ai
         PurgeTrigger(PlayerbotAI* ai) : TargetAuraDispelTrigger(ai, "purge", DISPEL_MAGIC, 3) {}
         virtual bool IsActive() override
         {
-            Unit* target = AI_VALUE(Unit*, "current target");
+            Unit* target = ai->GetUnit(AI_VALUE(ObjectGuid, "current target"));
             if (!target)
                 return false;
 
@@ -447,6 +447,13 @@ namespace ai
     {
     public:
         ShockTrigger(PlayerbotAI* ai) : DebuffTrigger(ai, "earth shock") {}
+        virtual bool IsActive() override;
+    };
+
+    class FlameShockTrigger : public DebuffTrigger 
+    {
+    public:
+        FlameShockTrigger(PlayerbotAI* ai) : DebuffTrigger(ai, "flame shock") {}
         virtual bool IsActive() override;
     };
 

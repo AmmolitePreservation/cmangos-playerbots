@@ -41,6 +41,7 @@
 #include "Guilds/GuildMgr.h"
 #include "Chat/ChannelMgr.h"
 #include "PlayerbotLLMInterface.h"
+#include "strategy/values/Stances.h"
 
 #include <boost/algorithm/string.hpp>
 
@@ -150,11 +151,29 @@ PlayerbotAI::PlayerbotAI(Player* bot) :
     engines[(uint8)BotState::BOT_STATE_DEAD] = AiFactory::createDeadEngine(bot, this, aiObjectContext);
     engines[(uint8)BotState::BOT_STATE_REACTION] = reactionEngine = AiFactory::createReactionEngine(bot, this, aiObjectContext);
 
+    StanceValue* stanceValue = (StanceValue*)aiObjectContext->GetValue<Stance*>("stance");
+
+    if (stanceValue)
+    {
+        if (IsTank(bot))
+            stanceValue->Load("turnback");
+        else if (!IsRanged(bot))
+            stanceValue->Load("behind");
+        else
+            stanceValue->Load("near");
+    }
+
     for (uint8 e = 0; e < (uint8)BotState::BOT_STATE_ALL; e++)
     {
         engines[e]->initMode = false;
         engines[e]->Init();
     }
+
+    // Action history listeners. Engines own and delete these (ActionExecutionListeners dtor).
+    engines[(uint8)BotState::BOT_STATE_COMBAT]->AddActionExecutionListener(new ActionHistoryListener(this, false));
+    engines[(uint8)BotState::BOT_STATE_NON_COMBAT]->AddActionExecutionListener(new ActionHistoryListener(this, false));
+    engines[(uint8)BotState::BOT_STATE_DEAD]->AddActionExecutionListener(new ActionHistoryListener(this, false));
+    engines[(uint8)BotState::BOT_STATE_REACTION]->AddActionExecutionListener(new ActionHistoryListener(this, true));
 
     currentEngine = engines[(uint8)BotState::BOT_STATE_NON_COMBAT];
     currentState = BotState::BOT_STATE_NON_COMBAT;
@@ -186,11 +205,14 @@ PlayerbotAI::PlayerbotAI(Player* bot) :
     botOutgoingPacketHandlers.AddHandler(SMSG_BATTLEFIELD_STATUS, "bg status");
     botOutgoingPacketHandlers.AddHandler(SMSG_GROUP_INVITE, "group invite");
     botOutgoingPacketHandlers.AddHandler(SMSG_GUILD_INVITE, "guild accept");
-    botOutgoingPacketHandlers.AddHandler(BUY_ERR_NOT_ENOUGHT_MONEY, "not enough money");
-    botOutgoingPacketHandlers.AddHandler(BUY_ERR_REPUTATION_REQUIRE, "not enough reputation");
+    botOutgoingPacketHandlers.AddHandler(SMSG_BUY_FAILED, "buy failed");
     botOutgoingPacketHandlers.AddHandler(SMSG_GROUP_SET_LEADER, "group set leader");
     botOutgoingPacketHandlers.AddHandler(SMSG_FORCE_RUN_SPEED_CHANGE, "check mount state");
-    botOutgoingPacketHandlers.AddHandler(SMSG_RESURRECT_REQUEST, "resurrect request");
+    // shouldDelay=true: ExternalEventHelper::HandlePacket() returns false when the 'resurrect request'
+    // trigger already holds an unconsumed event, and PacketHandlingHelper::Handle() only re-queues a
+    // packet on false when the opcode was registered with shouldDelay. Without it the request is
+    // dropped outright, so a corpse that is busy that tick never accepts and never gets resurrected.
+    botOutgoingPacketHandlers.AddHandler(SMSG_RESURRECT_REQUEST, "resurrect request", true);
     botOutgoingPacketHandlers.AddHandler(SMSG_INVENTORY_CHANGE_FAILURE, "cannot equip");
     botOutgoingPacketHandlers.AddHandler(SMSG_TRADE_STATUS, "trade status");
     botOutgoingPacketHandlers.AddHandler(SMSG_LOOT_RESPONSE, "loot response", true);
@@ -403,7 +425,11 @@ void PlayerbotAI::UpdateAI(uint32 elapsed, bool minimal)
         // normal landing
         if (!fallAfterJump)
         {
+#ifdef MANGOSBOT_ZERO
             bot->m_movementInfo.AddMovementFlag(MOVEFLAG_FALLINGFAR);
+#else
+            bot->m_movementInfo.AddMovementFlag(MOVEFLAG_PENDINGSTOP);
+#endif
 
             WorldPacket stop(MSG_MOVE_STOP);
 #ifdef MANGOSBOT_TWO
@@ -656,11 +682,11 @@ void PlayerbotAI::UpdateFaceTarget(uint32 elapsed, bool minimal)
             if (!sServerFacade.isMoving(bot) && !bot->isMovingOrTurning())
             {
                 AiObjectContext* context = GetAiObjectContext();
-                Unit* target = AI_VALUE(Unit*, "current target");
+                Unit* target = bot->GetPlayerbotAI()->GetUnit(AI_VALUE(ObjectGuid, "current target"));
                 if(target)
                 {
                     // Do not update the facing while pulling
-                    Unit* pullTarget = AI_VALUE(Unit*, "pull target");
+                    Unit* pullTarget = bot->GetPlayerbotAI()->GetUnit(AI_VALUE(ObjectGuid, "pull target"));
                     if (pullTarget == nullptr)
                     {
                         if (!AI_VALUE2(bool, "facing", "current target"))
@@ -722,6 +748,94 @@ const Action* PlayerbotAI::GetLastExecutedAction(BotState state) const
     }
 
     return nullptr;
+}
+
+std::string PlayerbotAI::GetLastAction(BotState state)
+{
+    Engine* engine = engines[(uint8)state];
+    if (engine)
+    {
+        return engine->GetLastAction();
+    }
+
+    return "";
+}
+
+std::string PlayerbotAI::GetLastExecutedActionName(BotState state)
+{
+    const Action* action = GetLastExecutedAction(state);
+    if (action)
+    {
+        return const_cast<Action*>(action)->getName();
+    }
+
+    return "";
+}
+
+std::string PlayerbotAI::GetLastActionDecision(BotState state)
+{
+    // The engine's lastAction is a tick log joined by '|'; the final segment is the decision taken.
+    std::string log = GetLastAction(state);
+
+    size_t pos = log.find_last_of('|');
+    std::string segment = (pos == std::string::npos) ? log : log.substr(pos + 1);
+
+    size_t begin = segment.find_first_not_of(" \t\r\n");
+    if (begin == std::string::npos)
+    {
+        return "";
+    }
+
+    size_t end = segment.find_last_not_of(" \t\r\n");
+    return segment.substr(begin, end - begin + 1);
+}
+
+void PlayerbotAI::SetActionHistorySize(uint32 size)
+{
+    actionHistorySize = size;
+
+    if (!size)
+        actionHistory.clear();
+    else
+        while (actionHistory.size() > size)
+            actionHistory.pop_front();
+}
+
+void PlayerbotAI::RecordActionHistory(Action* action, bool executed, bool reaction, uint32 elapsedMs)
+{
+    if (!actionHistorySize || !action)
+        return;
+
+    ActionHistoryEntry entry;
+    entry.tick = aiTick;
+    entry.timeMs = WorldTimer::getMSTime();
+    entry.elapsedMs = elapsedMs;
+    entry.action = action->getName();
+    entry.executed = executed;
+    entry.reaction = reaction;
+    entry.targetCounter = aiObjectContext->GetValue<ObjectGuid>("current target")->Get().GetCounter();
+
+    WorldPosition pos(bot);
+    entry.x = pos.getX();
+    entry.y = pos.getY();
+    entry.z = pos.getZ();
+    entry.mapId = pos.getMapId();
+
+    actionHistory.push_back(entry);
+
+    while (actionHistory.size() > actionHistorySize)
+        actionHistory.pop_front();
+}
+
+bool ActionHistoryListener::Before(Action* action, const Event& event)
+{
+    startMs = WorldTimer::getMSTime();
+    return true;
+}
+
+void ActionHistoryListener::After(Action* action, bool executed, const Event& event)
+{
+    ai->RecordActionHistory(action, executed, reaction, WorldTimer::getMSTimeDiff(startMs, WorldTimer::getMSTime()));
 }
 
 bool PlayerbotAI::IsImmuneToSpell(uint32 spellId) const
@@ -949,8 +1063,9 @@ void PlayerbotAI::OnCombatStarted()
 {
     if(!IsStateActive(BotState::BOT_STATE_COMBAT))
     {
-        // Reset the combat start timestamp
-        aiObjectContext->GetValue<time_t>("combat start time")->Set(time(0));
+        // Reset the combat start timestamp, unless Reset() kept it because the bot never left combat
+        if (!aiObjectContext->GetValue<time_t>("combat start time")->Get())
+            aiObjectContext->GetValue<time_t>("combat start time")->Set(time(0));
 
         // Update stay position on location when combat starts
         if (HasStrategy("stay", BotState::BOT_STATE_COMBAT) && !HasStrategy("stay", BotState::BOT_STATE_NON_COMBAT))
@@ -1026,7 +1141,7 @@ void PlayerbotAI::OnDeath()
 
                 AiObjectContext* context = GetAiObjectContext();
 
-                Unit* ctarget = AI_VALUE(Unit*, "current target");
+                Unit* ctarget = bot->GetPlayerbotAI()->GetUnit(AI_VALUE(ObjectGuid, "current target"));
 
                 if (ctarget)
                 {
@@ -1067,9 +1182,9 @@ void PlayerbotAI::OnDeath()
             }
         }
 
-        SET_AI_VALUE(Unit*, "current target", nullptr);
-        SET_AI_VALUE(Unit*, "enemy player target", nullptr);
-        SET_AI_VALUE(Unit*, "pull target", nullptr);
+        SET_AI_VALUE(ObjectGuid, "current target", ObjectGuid());
+        SET_AI_VALUE(ObjectGuid, "enemy player target", ObjectGuid());
+        SET_AI_VALUE(ObjectGuid, "pull target", ObjectGuid());
         SET_AI_VALUE(ObjectGuid, "attack target", ObjectGuid());
         SET_AI_VALUE(LootObject, "loot target", LootObject());
         SET_AI_VALUE(time_t, "combat start time", 0);
@@ -1127,10 +1242,155 @@ void PlayerbotAI::HandleCommands()
     }
 }
 
+void PlayerbotAI::RunOnOwningThread(Player* target, std::function<void(Player*)> action)
+{
+    if (!target || !action)
+        return;
+
+    // IsSafe() bundles the same-map/same-instance check and excludes targets that are mid-teleport,
+    // so when it holds we are on the target's own thread and can run inline.
+    if (target->IsInWorld() && IsSafe(target))
+    {
+        action(target);
+        return;
+    }
+
+    // The target belongs to another map: defer to the world thread. The action must not
+    // trust the raw pointer, so the target is resolved again by guid when it runs.
+    ObjectGuid targetGuid = target->GetObjectGuid();
+    sWorld.GetMessager().AddMessage([targetGuid, action](World* /*world*/)
+    {
+        Player* p = sObjectAccessor.FindPlayer(targetGuid);
+        if (p && p->IsInWorld() && !p->IsBeingTeleported())
+            action(p);
+    });
+}
+
+bool PlayerbotAI::SendSummonRequest(Player* summoner, Player* target)
+{
+    if (!summoner)
+        return false;
+
+    float x, y, z;
+    summoner->GetPosition(x, y, z);
+    return SendSummonRequest(summoner, target, summoner->GetMapId(), x, y, z);
+}
+
+bool PlayerbotAI::SendSummonRequest(Player* summoner, Player* target, uint32 mapId, float x, float y, float z)
+{
+    if (!summoner || !target || !target->GetSession())
+        return false;
+
+    // The normal summon response path (WorldSession::HandleSummonResponseOpcode) refuses dead or
+    // in-combat players, so let the caller fall back to a direct teleport in those cases.
+    if (!target->IsAlive() || target->IsInCombat())
+        return false;
+
+    target->SetSummonPoint(mapId, x, y, z, summoner->GetObjectGuid());
+
+    WorldPacket data(SMSG_SUMMON_REQUEST, 8 + 4 + 4);
+    data << summoner->GetObjectGuid();
+    data << uint32(summoner->GetZoneId());
+    data << uint32(MAX_PLAYER_SUMMON_DELAY * IN_MILLISECONDS);
+    target->GetSession()->SendPacket(data);
+    return true;
+}
+
+bool PlayerbotAI::SendResurrectRequest(Player* summoner, Player* target, uint32 mapId, float x, float y, float z)
+{
+    if (!summoner || !target || !target->GetSession())
+        return false;
+
+    // Only dead targets without an already pending request can be resurrected.
+    if (target->IsAlive() || target->isRessurectRequested())
+        return false;
+
+    // Any valid SpellEntry works - AddResurrectRequest only reads SPELL_ATTR_EX3_NO_RES_TIMER from
+    // it; health/mana are supplied explicitly below.
+    SpellEntry const* spellInfo = sServerFacade.LookupSpellInfo(2008); // Ancestral Spirit
+    if (!spellInfo)
+        return false;
+
+    // The caster is a player, so ResurrectUsingRequestDataInit teleports the target to the stored
+    // location before resurrecting it. The target accepts and applies both on its own map thread.
+#ifdef MANGOSBOT_TWO
+    target->AddResurrectRequest(summoner->GetObjectGuid(), spellInfo, Position(x, y, z, 0.0f), mapId,
+        target->GetMaxHealth(), target->GetMaxPower(POWER_MANA), false, "", false);
+#else
+    target->AddResurrectRequest(summoner->GetObjectGuid(), spellInfo, Position(x, y, z, 0.0f), mapId, target->GetMaxHealth(), target->GetMaxPower(POWER_MANA), false, "");
+#endif
+    return true;
+}
+
+namespace
+{
+    std::mutex killLogMutex;
+    std::map<uint32, time_t> killLogRegistry;
+
+    bool MarkKillLogged(ObjectGuid guid)
+    {
+        time_t now = time(nullptr);
+        std::scoped_lock lock(killLogMutex);
+        for (auto it = killLogRegistry.begin(); it != killLogRegistry.end();)
+        {
+            if (now - it->second > 60)
+                it = killLogRegistry.erase(it);
+            else
+                ++it;
+        }
+        if (killLogRegistry.find(guid.GetCounter()) != killLogRegistry.end())
+            return false;
+        killLogRegistry[guid.GetCounter()] = now;
+        return true;
+    }
+}
+
+void PlayerbotAI::LogKillEvents()
+{
+    if (!sPlayerbotAIConfig.hasLog("bot_events.csv"))
+        return;
+
+    if (!bot->IsInWorld())
+        return;
+
+    Map* map = bot->GetMap();
+    if (!map)
+        return;
+
+    AiObjectContext* context = GetAiObjectContext();
+    ObjectGuid target = AI_VALUE(ObjectGuid, "current target");
+
+    auto logIfDead = [this, map](ObjectGuid guid)
+    {
+        if (!guid.IsCreature())
+            return;
+
+        Creature* creature = map->GetCreature(guid);
+        if (!creature || creature->IsAlive())
+            return;
+
+        if (!MarkKillLogged(guid))
+            return;
+
+        sPlayerbotAIConfig.logEvent(this, "KillCreature", creature->GetName(), std::to_string(creature->GetEntry()));
+    };
+
+    if (target != m_killWatchTarget)
+    {
+        ObjectGuid previous = m_killWatchTarget;
+        m_killWatchTarget = target;
+        logIfDead(previous);
+    }
+
+    logIfDead(target);
+}
+
 void PlayerbotAI::UpdateAIInternal(uint32 elapsed, bool minimal)
 {
     if (bot->IsBeingTeleported() || !bot->IsInWorld())
         return;
+
+    aiTick++;
 
     std::string mapString = WorldPosition(bot).isInstance() ? "I" : std::to_string(bot->GetMapId());
     auto pmo = sPerformanceMonitor.start(PERF_MON_TOTAL, "PlayerbotAI::UpdateAIInternal " + mapString, nullptr, bot->GetMapId(), bot->GetInstanceId());
@@ -1202,6 +1462,7 @@ void PlayerbotAI::UpdateAIInternal(uint32 elapsed, bool minimal)
     masterOutgoingPacketHandlers.Handle(helper);
 
 	DoNextAction(minimal);
+    LogKillEvents();
 }
 
 void PlayerbotAI::HandleTeleportAck()
@@ -1233,13 +1494,30 @@ void PlayerbotAI::HandleTeleportAck()
         // add delay to simulate teleport delay
         SetAIInternalUpdateDelay(urand(1000, 2000));
 	}
-	else if (bot->IsBeingTeleportedFar())
-	{
-        bot->GetSession()->HandleMoveWorldportAckOpcode();
+    else if (bot->IsBeingTeleportedFar())
+    {
+        // guard BG race - bot-only fix for MapManager::CreateInstance assert
+        WorldLocation const& loc = bot->GetTeleportDest();
+        if (MapEntry const* mEntry = sMapStore.LookupEntry(loc.mapid))
+        {
+            if (mEntry->IsBattleGround())
+            {
+                uint32 bgId = bot->GetBattleGroundId();
+                if (!bgId || !sMapMgr.FindMap(loc.mapid, bgId))
+                {
+                    sLog.outError("PlayerbotAI::HandleTeleportAck: bot %s BG %u aborted bgId=%u", bot->GetName(), loc.mapid, bgId);
+                    bot->SetSemaphoreTeleportFar(false);
+                    Reset();
+                    if (IsRealPlayer())
+                        bot->SendHeartBeat();
+                    return;
+                }
+            }
+        }
 
-        // add delay to simulate teleport delay
+        bot->GetSession()->HandleMoveWorldportAckOpcode();
         SetAIInternalUpdateDelay(urand(2000, 5000));
-	}
+    }
 
     if (IsRealPlayer())
         bot->SendHeartBeat();
@@ -1269,14 +1547,16 @@ void PlayerbotAI::Reset(bool full)
     if (strategy)
         strategy->OnPullEnded();
 
-    RESET_AI_VALUE(Unit*,"old target");
-    RESET_AI_VALUE(Unit*,"current target");
-    RESET_AI_VALUE(Unit*,"pull target");
+    RESET_AI_VALUE(ObjectGuid,"old target");
+    RESET_AI_VALUE(ObjectGuid,"current target");
+    RESET_AI_VALUE(ObjectGuid,"pull target");
     RESET_AI_VALUE(ObjectGuid,"attack target");
     RESET_AI_VALUE(GuidPosition,"rpg target");
     RESET_AI_VALUE(LootObject,"loot target");
     RESET_AI_VALUE(uint32,"lfg proposal");
-    RESET_AI_VALUE(time_t,"combat start time");
+    // Keep the combat clock running while still in combat, so the 5 minute CombatStop() above can trigger
+    if (!sServerFacade.IsInCombat(bot))
+        RESET_AI_VALUE(time_t,"combat start time");
     bot->SetSelectionGuid(ObjectGuid());
 
     LastSpellCast & lastSpell = AI_VALUE(LastSpellCast&,"last spell cast");
@@ -1438,6 +1718,15 @@ void PlayerbotAI::HandleCommand(uint32 type, const std::string& text, Player& fr
     filtered = chatFilter.Filter(trim((std::string&)filtered));
     if (filtered.empty())
         return;
+
+    if (!sPlayerbotAIConfig.commandSeparator.empty() && filtered.find(sPlayerbotAIConfig.commandSeparator) != std::string::npos)
+    {
+        std::vector<std::string> commands;
+        split(commands, filtered, sPlayerbotAIConfig.commandSeparator.c_str());
+        for (const std::string& command : commands)
+            HandleCommand(type, sPlayerbotAIConfig.commandPrefix + command, fromPlayer);
+        return;
+    }
 
     if (filtered.substr(0, 6) == "debug ")
     {
@@ -1705,6 +1994,9 @@ void PlayerbotAI::HandleBotOutgoingPacket(const WorldPacket& packet)
             }
 #endif
 
+            if (message.empty())
+                return;
+
             bool isAiChat = sPlayerbotAIConfig.llmEnabled > 0 && (HasStrategy("ai chat", BotState::BOT_STATE_NON_COMBAT) || sPlayerbotAIConfig.llmEnabled == 3);
 
             if (m_recordIncommingMessages)
@@ -1840,7 +2132,6 @@ void PlayerbotAI::HandleBotOutgoingPacket(const WorldPacket& packet)
                     }
                 }
 
-                MANGOS_ASSERT(!message.empty());     
                 QueueChatResponse(msgtype, guid1, ObjectGuid(), message, chanName, name, isAiChat);
                 GetAiObjectContext()->GetValue<time_t>("last said", "chat")->Set(time(0) + urand(5, 25));
 
@@ -2023,6 +2314,39 @@ void PlayerbotAI::ChangeEngine(BotState type)
 
     if (currentEngine != engine)
     {
+        if (sPlayerbotAIConfig.hasLog("bot_states.csv"))
+        {
+            Engine* previous = currentEngine;
+
+            std::ostringstream out;
+            out << sPlayerbotAIConfig.GetTimestampStr() << "+00,";
+            out << bot->GetName() << ",";
+            out << (previous == engines[(uint8)BotState::BOT_STATE_COMBAT] ? "combat" :
+                    previous == engines[(uint8)BotState::BOT_STATE_NON_COMBAT] ? "non-combat" :
+                    previous == engines[(uint8)BotState::BOT_STATE_DEAD] ? "dead" :
+                    previous == engines[(uint8)BotState::BOT_STATE_REACTION] ? "reaction" : "none")
+                << ",";
+            switch (type)
+            {
+            case BotState::BOT_STATE_COMBAT: out << "combat"; break;
+            case BotState::BOT_STATE_NON_COMBAT: out << "non-combat"; break;
+            case BotState::BOT_STATE_DEAD: out << "dead"; break;
+            case BotState::BOT_STATE_REACTION: out << "reaction"; break;
+            default: out << "?"; break;
+            }
+            out << ",";
+            out << (bot->IsInCombat() ? "combat" : "safe") << ",";
+            out << (!sServerFacade.IsAlive(bot) ? (bot->GetCorpse() ? "ghost" : "dead") : "alive") << ",";
+            ObjectGuid target = aiObjectContext->GetValue<ObjectGuid>("current target")->Get();
+            if (Unit* t = GetUnit(target))
+                out << t->GetName();
+            out << ",";
+            WorldPosition(bot).printWKT(out);
+            out << sPlayerbotAIConfig.LocationColumns(bot);
+
+            sPlayerbotAIConfig.log("bot_states.csv", out.str().c_str());
+        }
+
         currentEngine = engine;
         currentState = type;
         ReInitCurrentEngine();
@@ -2058,12 +2382,18 @@ void PlayerbotAI::DoNextAction(bool min)
     // if in combat but stuck with old data - clear targets
     if (currentEngine == engines[(uint8)BotState::BOT_STATE_NON_COMBAT] && sServerFacade.IsInCombat(bot))
     {
-        if (aiObjectContext->GetValue<Unit*>("current target")->Get() != NULL ||
+        if (aiObjectContext->GetValue<ObjectGuid>("current target")->Get() != NULL ||
             aiObjectContext->GetValue<ObjectGuid>("attack target")->Get() != ObjectGuid() ||
-            aiObjectContext->GetValue<Unit*>("dps target")->Get() != NULL)
+            aiObjectContext->GetValue<ObjectGuid>("dps target")->Get() != NULL)
         {
             Reset();
         }
+    }
+
+    // left combat after a Reset() kept the combat start time - clear it so the next fight starts fresh
+    if (currentEngine == engines[(uint8)BotState::BOT_STATE_NON_COMBAT] && !sServerFacade.IsInCombat(bot) && aiObjectContext->GetValue<time_t>("combat start time")->Get())
+    {
+        aiObjectContext->GetValue<time_t>("combat start time")->Set(0);
     }
 
     bool minimal = !AllowActivity();
@@ -2087,12 +2417,25 @@ void PlayerbotAI::DoNextAction(bool min)
 
     Group *group = bot->GetGroup();
 
+    if (tickResetStrategiesPending && time(NULL) - lastTickResetStrategies >= 2)
+    {
+        lastTickResetStrategies = time(NULL);
+        tickResetStrategiesPending = false;
+        ResetStrategies();
+    }
+
     //Remove bot masters not in our group.
     if (master && master != bot && !HasActivePlayerMaster() && (!group || group->GetLeaderGuid() != master->GetObjectGuid()))
     {
         master = IsRealPlayer() ? bot : nullptr;
         SetMaster(master);
-        ResetStrategies();
+        if (time(NULL) - lastTickResetStrategies >= 2)
+        {
+            lastTickResetStrategies = time(NULL);
+            ResetStrategies();
+        }
+        else
+            tickResetStrategiesPending = true;
     }
 
     // test BG master set
@@ -2187,7 +2530,13 @@ void PlayerbotAI::DoNextAction(bool min)
         {
             master = newMaster;
             SetMaster(newMaster);
-            ResetStrategies();
+            if (time(NULL) - lastTickResetStrategies >= 2)
+            {
+                lastTickResetStrategies = time(NULL);
+                ResetStrategies();
+            }
+            else
+                tickResetStrategiesPending = true;
 
             if (sRandomPlayerbotMgr.IsFreeBot(bot))
             {
@@ -2208,11 +2557,17 @@ void PlayerbotAI::DoNextAction(bool min)
 
     // fix bots in BG not having proper strategies
 #ifdef MANGOSBOT_ZERO
-    if (bot->InBattleGround() && !HasStrategy("battleground", BotState::BOT_STATE_NON_COMBAT))
+    if (bot->InBattleGround() && !HasStrategy("battleground", BotState::BOT_STATE_NON_COMBAT) && time(NULL) - lastTickResetStrategies >= 2)
+    {
+        lastTickResetStrategies = time(NULL);
         ResetStrategies();
+    }
 #else
-    if ((bot->InBattleGround() && (!bot->IsBeingTeleported() && !bot->InArena()) && !HasStrategy("battleground", BotState::BOT_STATE_NON_COMBAT)) || ((!bot->IsBeingTeleported()&&bot->InArena()) && !HasStrategy("arena", BotState::BOT_STATE_NON_COMBAT)))
+    if (((bot->InBattleGround() && (!bot->IsBeingTeleported() && !bot->InArena()) && !HasStrategy("battleground", BotState::BOT_STATE_NON_COMBAT)) || ((!bot->IsBeingTeleported()&&bot->InArena()) && !HasStrategy("arena", BotState::BOT_STATE_NON_COMBAT))) && time(NULL) - lastTickResetStrategies >= 2)
+    {
+        lastTickResetStrategies = time(NULL);
         ResetStrategies();
+    }
 #endif
 
     if (master && master->IsInWorld())
@@ -2241,10 +2596,6 @@ void PlayerbotAI::DoNextAction(bool min)
     {
         if (bot->m_movementInfo.HasMovementFlag(MOVEFLAG_FLYING))
             bot->m_movementInfo.RemoveMovementFlag(MOVEFLAG_FLYING);
-#ifdef MANGOSBOT_ONE
-        if (bot->m_movementInfo.HasMovementFlag(MOVEFLAG_FLYING2))
-            bot->m_movementInfo.RemoveMovementFlag(MOVEFLAG_FLYING2);
-#endif
         if (bot->m_movementInfo.HasMovementFlag(MOVEFLAG_CAN_FLY))
             bot->m_movementInfo.RemoveMovementFlag(MOVEFLAG_CAN_FLY);
         if (bot->m_movementInfo.HasMovementFlag(MOVEFLAG_LEVITATING))
@@ -2285,6 +2636,44 @@ void PlayerbotAI::ChangeStrategy(const std::string& names, BotState type)
             engine->ChangeStrategy(names);
         }
     }
+}
+
+void PlayerbotAI::SaveCombatOrders(bool preserveExisting)
+{
+    if (preserveExisting && hasSavedCombatOrders)
+        return;
+
+    savedCombatOrders.clear();
+    const std::vector<std::string> orderStrategies = { "tank", "heal", "dps assist", "offheal", "passive" };
+    for (const std::string& strategy : orderStrategies)
+    {
+        if (HasStrategy(strategy, BotState::BOT_STATE_COMBAT))
+            savedCombatOrders.push_back(strategy);
+    }
+    savedCombatOrderDelay = aiObjectContext->GetValue<uint8>("wait for attack time")->Get();
+    savedCombatOrderTarget = aiObjectContext->GetValue<std::string>("combat order target")->Get();
+    const std::string resistOrder = aiObjectContext->GetValue<std::string>("resist order")->Get();
+    savedResistOrder = resistOrder.substr(0, resistOrder.find(':'));
+    hasSavedCombatOrders = true;
+}
+
+bool PlayerbotAI::RestoreCombatOrders()
+{
+    if (!hasSavedCombatOrders)
+        return false;
+
+    ChangeStrategy("-tank,-heal,-dps assist,-offheal,-passive", BotState::BOT_STATE_COMBAT);
+    for (const std::string& strategy : savedCombatOrders)
+        ChangeStrategy("+" + strategy, BotState::BOT_STATE_COMBAT);
+    aiObjectContext->GetValue<uint8>("wait for attack time")->Set(savedCombatOrderDelay);
+    aiObjectContext->GetValue<std::string>("combat order target")->Set(savedCombatOrderTarget);
+    hasSavedCombatOrders = false;
+
+    const std::string resistOrder = aiObjectContext->GetValue<std::string>("resist order")->Get();
+    if (resistOrder.substr(0, resistOrder.find(':')) != savedResistOrder)
+        DoSpecificAction("resist", Event("co restore", savedResistOrder.empty() ? "none" : savedResistOrder, GetMaster()), true);
+
+    return true;
 }
 
 void PlayerbotAI::PrintStrategies(Player* requester, BotState type)
@@ -2506,6 +2895,18 @@ bool PlayerbotAI::HasStrategy(const std::string& name, BotState type)
 
 void PlayerbotAI::ResetStrategies(bool autoLoad)
 {
+#ifdef GenerateBotTests
+    std::map<uint8, std::vector<std::string>> testStrategies;
+    for (uint8 i = 0; i < (uint8)BotState::BOT_STATE_ALL; i++)
+    {
+        for (std::string_view strat : engines[i]->GetStrategies())
+        {
+            if (strat.rfind("test::", 0) == 0)
+                testStrategies[i].push_back(std::string(strat));
+        }
+    }
+#endif
+
     for (uint8 i = 0; i < (uint8)BotState::BOT_STATE_ALL; i++)
     {
         engines[i]->initMode = true;
@@ -2516,7 +2917,28 @@ void PlayerbotAI::ResetStrategies(bool autoLoad)
     AiFactory::AddDefaultNonCombatStrategies(bot, this, engines[(uint8)BotState::BOT_STATE_NON_COMBAT]);
     AiFactory::AddDefaultDeadStrategies(bot, this, engines[(uint8)BotState::BOT_STATE_DEAD]);
     AiFactory::AddDefaultReactionStrategies(bot, this, reactionEngine);
+
+    StanceValue* stanceValue = (StanceValue*)aiObjectContext->GetValue<Stance*>("stance");
+
+    if (stanceValue)
+    {
+        if (IsTank(bot))
+            stanceValue->Load("turnback");
+        else if (!IsRanged(bot))
+            stanceValue->Load("behind");
+        else
+            stanceValue->Load("near");
+    }
+
     if (autoLoad && HasPlayerRelation()) sPlayerbotDbStore.Load(this);
+
+#ifdef GenerateBotTests
+    for (auto& [state, strats] : testStrategies)
+    {
+        for (const auto& strat : strats)
+            engines[state]->addStrategy(strat);
+    }
+#endif
 
     for (uint8 i = 0; i < (uint8)BotState::BOT_STATE_ALL; i++)
     {
@@ -2901,6 +3323,9 @@ std::vector<std::pair<const Quest*, uint32>> PlayerbotAI::GetCurrentQuestsRequir
 
         QuestStatus status = bot->GetQuestStatus(questId);
         const Quest* quest = sObjectMgr.GetQuestTemplate(questId);
+        if (!quest)
+            continue;
+
         for (uint8 i = 0; i < std::size(quest->ReqItemId); ++i)
         {
             if (quest->ReqItemId[i] == itemId)
@@ -4596,7 +5021,9 @@ bool PlayerbotAI::CastSpell(uint32 spellId, Unit* target, Item* itemTarget, bool
 	//bot->clearUnitState(UNIT_STAT_FOLLOW);
 
 	bool failWithDelay = false;
-    if (!bot->IsStandState())
+    // Respect native seated-casting permissions for eating and drinking.
+    SpellEntry const* sitCheckInfo = sServerFacade.LookupSpellInfo(spellId);
+    if (!bot->IsStandState() && !(sitCheckInfo && sitCheckInfo->HasAttribute(SPELL_ATTR_ALLOW_WHILE_SITTING)))
     {
         bot->SetStandState(UNIT_STAND_STATE_STAND);
         failWithDelay = true;
@@ -6011,8 +6438,10 @@ ActivePiorityType PlayerbotAI::GetPriorityType()
 
     AiObjectContext* context = GetAiObjectContext();
 
+#ifdef GenerateBotTests
     if (AI_VALUE2(bool, "manual bool", "is running test"))
         return ActivePiorityType::IS_RUNNING_TEST;
+#endif
 
     if (!WorldPosition(bot).isOverworld())
     {
@@ -6566,7 +6995,8 @@ std::string PlayerbotAI::HandleRemoteCommand(std::string command)
     }
     else if (command == "tpos")
     {
-        Unit* target = *GetAiObjectContext()->GetValue<Unit*>("current target");
+        PlayerbotAI* ai = bot->GetPlayerbotAI();
+        Unit* target = ai->GetUnit(ai->GetAiObjectContext()->GetValue<ObjectGuid>("current target")->Get());
         if (!target) {
             return "";
         }
@@ -6576,7 +7006,8 @@ std::string PlayerbotAI::HandleRemoteCommand(std::string command)
     }
     else if (command == "target")
     {
-        Unit* target = *GetAiObjectContext()->GetValue<Unit*>("current target");
+        PlayerbotAI* ai = bot->GetPlayerbotAI();
+        Unit* target = ai->GetUnit(ai->GetAiObjectContext()->GetValue<ObjectGuid>("current target")->Get());
         if (!target) {
             return "";
         }
@@ -6588,7 +7019,8 @@ std::string PlayerbotAI::HandleRemoteCommand(std::string command)
         int pct = (int)((static_cast<float> (bot->GetHealth()) / bot->GetMaxHealth()) * 100);
         std::ostringstream out; out << pct << "%";
 
-        Unit* target = *GetAiObjectContext()->GetValue<Unit*>("current target");
+        PlayerbotAI* ai = bot->GetPlayerbotAI();
+        Unit* target = ai->GetUnit(ai->GetAiObjectContext()->GetValue<ObjectGuid>("current target")->Get());
         if (!target) {
             return out.str();
         }
@@ -6612,7 +7044,8 @@ std::string PlayerbotAI::HandleRemoteCommand(std::string command)
         out << ", victim: " << (victim ? victim->GetName() : "none");
 
         out << " | BotAI: current target: ";
-        Unit* aiTarget = *GetAiObjectContext()->GetValue<Unit*>("current target");
+        PlayerbotAI* ai = bot->GetPlayerbotAI();
+        Unit* aiTarget = ai->GetUnit(ai->GetAiObjectContext()->GetValue<ObjectGuid>("current target")->Get());
         if (aiTarget)
         {
             out << aiTarget->GetName() << " (" << aiTarget->GetObjectGuid().GetCounter() << ")";
@@ -6837,6 +7270,7 @@ float PlayerbotAI::GetRange(std::string type)
     if (type == "heal") return sPlayerbotAIConfig.healDistance;
     if (type == "follow") return sPlayerbotAIConfig.followDistance;
     if (type == "guard") return sPlayerbotAIConfig.sightDistance;
+    if (type == "loot") return sPlayerbotAIConfig.lootDistance;
     if (type == "followraid") return sPlayerbotAIConfig.raidFollowDistance;
     if (type == "wandermin") return sPlayerbotAIConfig.wanderMinDistance;
     if (type == "wandermax") return sPlayerbotAIConfig.wanderMaxDistance;
@@ -7839,7 +8273,7 @@ std::list<Unit*> PlayerbotAI::GetAllHostileNPCNonPetUnitsAroundWO(WorldObject* w
             if (hostileUnit->IsCreature())
             {
                 Creature* creature = GetCreature(hostileUnit->GetObjectGuid());
-                if (!creature || (creature && creature->IsPet()))
+                if (!creature || (creature && creature->IsPet()) || !sServerFacade.IsHostileTo(bot, creature))
                 {
                     continue;
                 }
@@ -8331,8 +8765,14 @@ void PlayerbotAI::EnchantItemT(uint32 spellid, uint8 slot, Item* item)
       return;
    }
 
-   if (!((1 << pItem->GetProto()->SubClass) & spellInfo->EquippedItemSubClassMask) &&
-      !((1 << pItem->GetProto()->InventoryType) & spellInfo->EquippedItemInventoryTypeMask))
+   // Every restriction the spell sets must match, not just one of them: a ring
+   // otherwise passes on the sub class bit alone and gets a chest enchant.
+   if ((spellInfo->EquippedItemClass >= 0 &&
+        uint32(spellInfo->EquippedItemClass) != pItem->GetProto()->Class) ||
+       (spellInfo->EquippedItemSubClassMask &&
+        !((uint32(1) << pItem->GetProto()->SubClass) & uint32(spellInfo->EquippedItemSubClassMask))) ||
+       (spellInfo->EquippedItemInventoryTypeMask &&
+        !((uint32(1) << pItem->GetProto()->InventoryType) & uint32(spellInfo->EquippedItemInventoryTypeMask))))
    {
 
       sLog.outError("%s: items could not be enchanted, wrong item type equipped", bot->GetName());
@@ -8436,21 +8876,10 @@ bool PlayerbotAI::CanMove()
     {
         return false;
     }
-#ifdef MANGOSBOT_ONE
     if (bot->IsFalling())
     {
         return false;
     }
-    if (bot->IsJumping())
-    {
-        return false;
-    }
-#else
-    if (bot->IsFalling())
-    {
-        return false;
-    }
-#endif
 
     MotionMaster& mm = *bot->GetMotionMaster();
     MovementGeneratorType currentMotion = mm.GetCurrentMovementGeneratorType();
@@ -8498,11 +8927,24 @@ void PlayerbotAI::StopMoving()
     }
     
     bot->InterruptMoving(true);
+
+    Position pos = bot->GetPosition();
+
+    bool airborne = bot->IsFlying() || bot->IsFreeFlying() || IsJumping() || bot->IsFalling() ||
+        bot->m_movementInfo.HasMovementFlag(MOVEFLAG_FALLINGFAR) ||
+        bot->m_movementInfo.HasMovementFlag(MOVEFLAG_HOVER) ||
+        bot->m_movementInfo.HasMovementFlag(MOVEFLAG_LEVITATING);
+
+    if (!bot->GetTransport() && !airborne && !bot->IsInWater() && !sServerFacade.IsUnderwater(bot))
+    {
+        float groundZ = pos.z;
+        bot->UpdateAllowedPositionZ(pos.x, pos.y, pos.z);
+        if (fabs(pos.z - groundZ) > 0.1f)
+            bot->Relocate(pos.x, pos.y, pos.z, pos.o);
+    }
+
     MovementInfo mInfo = bot->m_movementInfo;
-    float x, y, z;
-    bot->GetPosition(x, y, z);
-    float o = bot->GetPosition().o;
-    mInfo.ChangePosition(x, y, z, o);
+    mInfo.ChangePosition(pos.x, pos.y, pos.z, pos.o);
     WorldPacket data(MSG_MOVE_STOP);
 #ifdef MANGOSBOT_TWO
     data << bot->GetObjectGuid().WriteAsPacked();

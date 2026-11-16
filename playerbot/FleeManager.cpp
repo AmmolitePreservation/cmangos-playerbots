@@ -42,7 +42,8 @@ bool intersectsOri(float angle, std::list<float>& angles, float angleIncrement)
 
 void FleeManager::calculatePossibleDestinations(std::list<FleePoint*> &points)
 {
-    Unit *target = *bot->GetPlayerbotAI()->GetAiObjectContext()->GetValue<Unit*>("current target");
+    PlayerbotAI* ai = bot->GetPlayerbotAI();
+    Unit *target = ai->GetUnit(ai->GetAiObjectContext()->GetValue<ObjectGuid>("current target")->Get());
 
     float botPosX = startPosition.getX();
     float botPosY = startPosition.getY();
@@ -73,7 +74,7 @@ void FleeManager::calculatePossibleDestinations(std::list<FleePoint*> &points)
             {
                 if (intersectsOri(angle, enemyOri, angleIncrement)) continue;
 
-                float x = botPosX + cos(angle) * maxAllowedDistance, y = botPosY + sin(angle) * maxAllowedDistance, z = botPosZ + CONTACT_DISTANCE;
+                float x = botPosX + cos(angle) * dist, y = botPosY + sin(angle) * dist, z = botPosZ + CONTACT_DISTANCE;
                 if (MoveStyleValue::CheckForEdges(bot->GetPlayerbotAI()) && isTooCloseToEdge(x, y, z, angle)) continue;
 
                 if (forceMaxDistance && sServerFacade.IsDistanceLessThan(sServerFacade.GetDistance2d(bot, x, y), maxAllowedDistance - sPlayerbotAIConfig.tooCloseDistance))

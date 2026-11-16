@@ -2,6 +2,7 @@
 #include "playerbot/playerbot.h"
 #include "TankTargetValue.h"
 #include "PossibleAttackTargetsValue.h"
+#include "RtiValue.h"
 
 using namespace ai;
 
@@ -41,11 +42,15 @@ protected:
 };
 
 
-Unit* TankTargetValue::Calculate()
+ObjectGuid TankTargetValue::Calculate()
 {
-    Unit* rti = RtiTargetValue::Calculate();
+    ObjectGuid ordered = CombatOrderTargetValue::FindTarget(ai, true);
+    if (ordered) return ordered;
+
+    ObjectGuid rti = RtiTargetValue::Calculate();
     if (rti) return rti;
 
     FindTargetForTankStrategy strategy(ai);
-    return FindTarget(&strategy);
+    Unit* target = FindTarget(&strategy);
+    return target ? target->GetObjectGuid() : ObjectGuid();
 }

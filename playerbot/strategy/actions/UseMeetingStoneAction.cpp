@@ -78,8 +78,35 @@ bool SummonAction::Execute(Event& event)
     if (!requester || requester->IsBeingTeleported())
         return false;
 
+    uint32 summonCost = (requester->GetSession()->GetSecurity() <= SEC_PLAYER && requester->isRealPlayer()) ? sPlayerbotAIConfig.botSummonCost : 0;
+    bool canPaySummon = requester->GetMoney() >= summonCost;
+    std::string summonCostText = "You need " + ChatHelper::formatMoney(summonCost) + " to summon me.";
+    auto chargeSummon = [this, requester, summonCost](bool summoned)
+    {
+        if (summoned && summonCost)
+        {
+            ai->RunOnOwningThread(requester, [summonCost](Player* payer)
+            {
+                if (payer->GetMoney() >= summonCost)
+                    payer->ModifyMoney(-int32(summonCost));
+                else
+                    ChatHandler(payer).PSendSysMessage("You could not pay %s for the summon.", ChatHelper::formatMoney(summonCost).c_str());
+            });
+        }
+
+        return summoned;
+    };
+
     if (requester->GetSession()->GetSecurity() > SEC_PLAYER || sPlayerbotAIConfig.nonGmFreeSummon)
-        return Teleport(requester, requester, bot);
+    {
+        if (!canPaySummon)
+        {
+            ai->TellPlayerNoFacing(requester, summonCostText);
+            return false;
+        }
+
+        return chargeSummon(Teleport(requester, requester, bot));
+    }
 
     if(bot->GetMapId() == requester->GetMapId() && !WorldPosition(bot).canPathTo(requester, bot) && bot->GetDistance(requester) < sPlayerbotAIConfig.sightDistance) //We can't walk to requester so fine to short-range teleport.
         return Teleport(requester, requester, bot);
@@ -87,7 +114,13 @@ bool SummonAction::Execute(Event& event)
     if (bot->IsTaxiFlying())
         return false;
 
-    if (SummonUsingGos(requester, requester, bot) || SummonUsingNpcs(requester, requester, bot))
+    if (!canPaySummon)
+    {
+        ai->TellPlayerNoFacing(requester, summonCostText);
+        return false;
+    }
+
+    if (chargeSummon(SummonUsingGos(requester, requester, bot) || SummonUsingNpcs(requester, requester, bot)))
     {
         ai->TellPlayerNoFacing(requester, BOT_TEXT("hello"));
         return true;
@@ -190,29 +223,70 @@ bool SummonAction::Teleport(Player* requester, Player *summoner, Player *player)
 
             if (summoner->IsWithinLOS(x, y, z + player->GetCollisionHeight(), true))
             {
+                bool resurrectPlayer = false;
                 if (sServerFacade.UnitIsDead(player) && sServerFacade.IsAlive(summoner))
                 {
                     if (!ai->IsSafe(player) || !ai->IsSafe(summoner))
                         return false;
 
-                    player->ResurrectPlayer(1.0f, false);
-                    player->SpawnCorpseBones();
-                    ai->TellPlayerNoFacing(requester, "I live, again!");
+                    resurrectPlayer = true;
                 }
 
-                if (player->IsTaxiFlying())
+                // Dead target: a summon request cannot be accepted, so send a resurrect request
+                // instead - the target teleports itself to the spot and resurrects itself. Alive
+                // target: a normal summon request. Only a transport boarding or a rejected request
+                // falls back to a direct, thread-safe teleport on the acting bot's own thread.
+                ObjectGuid summonerGuid = summoner->GetObjectGuid();
+                bool moveOnTransport = (summoner->GetTransport() != nullptr);
+
+                bool handled = false;
+                if (resurrectPlayer)
+                    handled = PlayerbotAI::SendResurrectRequest(summoner, player, mapId, x, y, z);
+                if (!handled && !moveOnTransport)
+                    handled = PlayerbotAI::SendSummonRequest(summoner, player, mapId, x, y, z);
+
+                if (!handled)
                 {
-                    player->TaxiFlightInterrupt();
-                    player->GetMotionMaster()->MovementExpired();
+                    ai->RunOnOwningThread(player, [mapId, x, y, z, resurrectPlayer, moveOnTransport, summonerGuid](Player* p)
+                    {
+                        if (resurrectPlayer)
+                        {
+                            p->ResurrectPlayer(1.0f, false);
+                            p->SpawnCorpseBones();
+                        }
+
+                        if (p->IsTaxiFlying())
+                        {
+                            p->TaxiFlightInterrupt();
+                            p->GetMotionMaster()->MovementExpired();
+                        }
+
+                        p->GetMotionMaster()->Clear();
+                        p->TeleportTo(mapId, x, y, z, 0);
+                        if (p->isRealPlayer())
+                            p->SendHeartBeat();
+
+                        if (moveOnTransport)
+                        {
+                            if (Player* s = sObjectAccessor.FindPlayer(summonerGuid))
+                            {
+                                if (GenericTransport* transport = s->GetTransport())
+                                {
+                                    // Board on the summoner's spot. We do this explicitly instead of
+                                    // passing the transport to TeleportTo: that path is client-oriented
+                                    // (it wants local coords on a far teleport but world coords on a near
+                                    // one). UpdatePassengerPosition skips us until we are on the
+                                    // transport's map, so boarding a still-teleporting player is safe.
+                                    p->m_movementInfo.t_pos = s->m_movementInfo.GetTransportPos();
+                                    transport->AddPassenger(p, false);
+                                }
+                            }
+                        }
+                    });
                 }
 
-                player->GetMotionMaster()->Clear();
-                player->TeleportTo(mapId, x, y, z, 0);
-                if(player->isRealPlayer())
-                    player->SendHeartBeat();
-
-                if (summoner->GetTransport())
-                    summoner->GetTransport()->AddPassenger(player, false);
+                if (resurrectPlayer)
+                    ai->TellPlayerNoFacing(requester, "I live, again!");
                     
                 if(ai->HasStrategy("stay", BotState::BOT_STATE_NON_COMBAT))
                     SET_AI_VALUE2(PositionEntry, "pos", "stay", PositionEntry(x, y, z, mapId));

@@ -257,10 +257,30 @@ bool LootObject::IsLootPossible(Player* bot)
 
     if (reqItem && !bot->HasItemCount(reqItem, 1))
     {
-        if (debug)
-            ai->TellDebug(ai->GetMaster(), objectName + ": I lack its key item " + std::to_string(reqItem) + ".", "debug loot");
-        return false;
+        bool canOpen = false;
+        // If this is a chest and it was locked before, check if it's unlocked now so we don't need item
+        if (guid.IsGameObject())
+        {
+            GameObject* go = ai->GetGameObject(guid);
+            if (go)
+            {
+                uint32 lootid = go->GetGOInfo()->GetLootId();
+                if (lootid && go->GetGOInfo()->type == GAMEOBJECT_TYPE_CHEST)
+                {
+                    if (!go->HasFlag(GAMEOBJECT_FLAGS, GO_FLAG_LOCKED))
+                        canOpen = true;
+                }
+            }
+        }
+        if (!canOpen)
+        {
+            if (debug)
+                ai->TellDebug(ai->GetMaster(), objectName + ": I lack its key item " + std::to_string(reqItem) + ".", "debug loot");
+            return false;
+        }
+
     }
+        
 
     if (guid.IsCreature())
     {

@@ -4,17 +4,26 @@
 #include <vector>
 #include <map>
 
+class PlayerbotAI;
+
 namespace ai
 {
     class TestRegistry
     {
     public:
         static void RegisterMoveTests();
+        static void RegisterFleeTests();
         static void RegisterSpawnTests();
         static void RegisterRandomizeTests();
         static void RegisterInstanceTests();
         static void RegisterBankTests();
         static void RegisterQuestDkStartTests();
+        static void RegisterQuestSuiteTests();
+        static void RegisterTeleportTests();
+        static void RegisterLabTests();
+        static void RegisterLabMicroTests();
+        static void RegisterLabStayGuardTests();
+        static void RegisterLabLootTests();
 
         static void RegisterTest(const std::string& name, const std::vector<std::string>& script);
         static void RegisterNamedLocation(const std::string& name, const GuidPosition& pos);
@@ -22,11 +31,14 @@ namespace ai
         static std::vector<std::string> GetTestScript(const std::string& name);
         static std::vector<std::string> GetAvailableTests();
         static void GenerateMovementTests(int maxTests, float minDist, float maxDist);
+        static void GenerateTransportTests(int maxTests);
         static void GenerateBossWalkTest();
+        static void GenerateBossReachTest();
         static void GenerateBossEncounterTest();
         static std::string GetBotCreationRequirement(const std::string& testName);
         static uint32 ExpectedBotSpawnCount(const std::string& testName);
 
+        static void StartTest(PlayerbotAI* ai, const std::string& testName);
         static bool ParseLocation(const std::string& str, GuidPosition& out);
         static bool LookupNamedLocation(const std::string& name, GuidPosition& out);
 
@@ -34,6 +46,7 @@ namespace ai
         static std::string ApplyScenarioParams(const std::string& line, const std::map<std::string, std::string>& params);
         static std::vector<std::string> ApplyScenarioParams(const std::vector<std::string>& script, const std::map<std::string, std::string>& params);
         static void GenerateMovementTestsImpl(int maxTests, float minDist, float maxDist);
+        static void GenerateTransportTestsImpl(int maxTests);
         static void EnsureTestsRegistered();
         static void EnsureLocationsInit();
     };

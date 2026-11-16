@@ -174,13 +174,13 @@ PullStrategy* PullStrategy::Get(PlayerbotAI* ai)
 Unit* PullStrategy::GetTarget() const
 {
     AiObjectContext* context = ai->GetAiObjectContext();
-    return AI_VALUE(Unit*, "pull target");
+    return ai->GetUnit(AI_VALUE(ObjectGuid, "pull target"));
 }
 
 void PullStrategy::SetTarget(Unit* target)
 {
     AiObjectContext* context = ai->GetAiObjectContext();
-    SET_AI_VALUE(Unit*, "pull target", target);
+    SET_AI_VALUE(ObjectGuid, "pull target", target ? target->GetObjectGuid() : ObjectGuid());
 }
 
 bool PullStrategy::CanDoPullAction(Unit* target)
@@ -258,10 +258,10 @@ float PullMultiplier::GetValue(Action* action)
     return 1.0f;
 }
 
-void PossibleAdsStrategy::InitCombatTriggers(std::list<TriggerNode*>& triggers)
+void PossibleAddsStrategy::InitCombatTriggers(std::list<TriggerNode*>& triggers)
 {
     triggers.push_back(new TriggerNode(
-        "possible ads",
+        "possible adds",
         NextAction::array(0, new NextAction("flee with pet", ACTION_EMERGENCY), NULL)));
 }
 

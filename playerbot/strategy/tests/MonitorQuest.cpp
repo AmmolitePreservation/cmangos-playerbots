@@ -1,6 +1,7 @@
 #include "playerbot/playerbot.h"
 #include "MonitorQuest.h"
 #include "Quests/QuestDef.h"
+#include "TestRegistry.h"
 
 using namespace ai;
 
@@ -72,6 +73,15 @@ bool MonitorQuestRewarded::IsConditionMet(const std::string& monitorStr, Player*
     return false;
 }
 
+bool MonitorQuestTurnedIn::IsConditionMet(const std::string& monitorStr, Player* bot, TestContext& ctx) const
+{
+    uint32 questId = ExtractLeadingId(monitorStr);
+    if (!questId)
+        return false;
+
+    return bot->GetQuestStatus(questId) != QUEST_STATUS_COMPLETE;
+}
+
 // =====================================================
 // MonitorQuestActive
 // Format: "quest active <questId> => pass/fail \"message\""
@@ -132,6 +142,46 @@ bool MonitorQuestObjective::IsConditionMet(const std::string& monitorStr, Player
         return false;
 
     const QuestStatusData& statusData = it->second;
+
+    // Optional "count <op> <N>" form (partial progress), e.g. "quest objective 123 2 count > 0 => pass".
+    // Without it the objective must be fully satisfied ("done").
+    size_t tokStart = monitorStr.find_first_not_of(" \t", objEnd == std::string::npos ? monitorStr.size() : objEnd);
+    if (tokStart != std::string::npos && monitorStr.compare(tokStart, 5, "count") == 0)
+    {
+        size_t cmpStart = monitorStr.find_first_not_of(" \t", tokStart + 5);
+        if (cmpStart == std::string::npos)
+            return false;
+
+        std::string op;
+        std::string valueStr;
+        std::string valueName;
+        std::string parseMessage;
+        if (TryParseComparisonValue(monitorStr.substr(cmpStart), valueName, op, valueStr, parseMessage, GetName()) != TestResult::PASS)
+            return false;
+
+        uint32 threshold = 0;
+        if (TryParseUInt32Strict(valueStr, threshold, parseMessage, GetName()) != TestResult::PASS)
+            return false;
+
+        uint32 progress = 0;
+        if (quest->ReqCreatureOrGOId[objIndex])
+            progress = statusData.m_creatureOrGOcount[objIndex];
+        else if (objIndex < QUEST_ITEM_OBJECTIVES_COUNT && quest->ReqItemId[objIndex])
+            progress = bot->GetItemCount(quest->ReqItemId[objIndex], true);
+        else
+            return false;
+
+        if (op == ">")
+            return progress > threshold;
+        if (op == "<")
+            return progress < threshold;
+        if (op == "==")
+            return progress == threshold;
+        if (op == "!=")
+            return progress != threshold;
+
+        return false;
+    }
 
     // Check creature/GO count objective
     if (quest->ReqCreatureOrGOId[objIndex])
@@ -207,6 +257,49 @@ bool MonitorHasMount::IsConditionMet(const std::string& monitorStr, Player* bot,
                 return true;
         }
     }
+
+    return false;
+}
+
+// =====================================================
+// MonitorNpcDead
+// Format: "npc dead <location> => abort \"message\""
+// True when the named creature location has no live unit on the bot's map
+// (giver/taker died or despawned mid-test). GameObject locations are not
+// covered, mirroring the setup-time require.
+// =====================================================
+bool MonitorNpcDead::IsConditionMet(const std::string& monitorStr, Player* bot, TestContext& ctx) const
+{
+    std::string locName = monitorStr;
+    size_t arrow = locName.find("=>");
+    if (arrow != std::string::npos)
+        locName = locName.substr(0, arrow);
+    size_t nameStart = locName.find_first_not_of(" \t");
+    if (nameStart == std::string::npos)
+        return false;
+    size_t nameEnd = locName.find_last_not_of(" \t");
+    locName = locName.substr(nameStart, nameEnd - nameStart + 1);
+    if (locName.empty())
+        return false;
+
+    GuidPosition loc;
+    if (!TestRegistry::ParseLocation(locName, loc))
+        return false;
+
+    if (!loc || !loc.IsCreature() || !loc.GetEntry())
+        return false;
+
+    if (!bot->IsInWorld() || !bot->GetMap())
+        return false;
+
+    uint32 instanceId = bot->GetMapId() == loc.getMapId() ? bot->GetInstanceId() : 0;
+
+    Creature* liveNpc = loc.GetCreature(instanceId);
+    if (!liveNpc)
+        return false;
+
+    if (!liveNpc->IsAlive())
+        return true;
 
     return false;
 }

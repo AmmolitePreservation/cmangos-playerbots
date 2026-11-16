@@ -11,6 +11,24 @@ AiPlayerbot.Enabled = 1
 # Enable random bot system
 AiPlayerbot.RandomBotAutologin = 1
 
+# PartyBotOnly - old partybot compatibility mode (the deprecated in-core PlayerBot). One switch, everything follows from it:
+#   - No bot population: the random bot system (spawn, login churn, wandering, guild/quest/bg
+#     agendas) is switched off. Bots exist only while a real player has them added.
+#   - Bots can only be added from the requesting player's own account (like the old partybot;
+#     AiPlayerbot.AllowMultiAccountAltBots and random-account adds are refused with "Not in your account").
+#   - Player-added bots run a quiet agenda: follow/stay, combat rotation, loot, quest sharing,
+#     buffs, food, mount, collision. No grind/travel/rpg/maintenance/battleground/lfg/gather/fishing
+#     agendas, no duels, no emotes. Strategies saved in the database or listed in
+#     AiPlayerbot.NonCombatStrategies are filtered the same way when the bot logs in.
+#   - The old whisper wording is understood: orders combat tank/heal/assist/passive/reset/resist*,
+#     orders delay, resumeorders, follow near/far, pull test/ready, neutralize, process d/m/p, sell all.
+#   Native module commands (order, resist, collect, survey, find, get, mill, prospect, auction, pull
+#   capability, co save/restore) work in every mode; only the old spellings need this switch.
+#   Note: flipping this at runtime does not retire bots that are already online - restart required.
+#   See docs/OldPartyBot.md for the complete command reference.
+
+AiPlayerbot.PartyBotOnly = 0
+
 # Log on all random bots on start
 AiPlayerbot.RandomBotLoginAtStartup = 1
 
@@ -82,10 +100,12 @@ AiPlayerbot.RandomBotAccountCount = 200
 # Percentage of fully active bots. Default is 10, higher numbers may affect performance
 # AiPlayerbot.botActiveAlone = 10
 
-# Limit random bot max level to online players max level + 5 and uses reference level 1 without a player.
+# Limit random bot max level to online players max level + SyncLevelMaxAbove.
+# SyncLevelNoPlayer is the reference level used while no player is online.
+# It defaults to AiPlayerbot.randombotStartingLevel.
 # AiPlayerbot.SyncLevelWithPlayers = 0
 # AiPlayerbot.SyncLevelMaxAbove = 5
-# AiPlayerbot.SyncLevelNoPlayer = 1
+# AiPlayerbot.SyncLevelNoPlayer = 5
 
 # Sync non-random bot alt levels to master level automatically
 # When enabled, bot alts will level up one level at a time to match their master's level
@@ -201,8 +221,14 @@ AiPlayerbot.RandomBotShowCloak = 1
 # Every bots started on the specified level and level up by killing mobs.
 AiPlayerbot.DisableRandomLevels = 0
 
-# Set randombots starting level here if "AiPlayerbot.DisableRandomLevels" enabled
-# Recommended: 5+
+# Random bots at or below this level are treated as new characters: when they are
+# randomized they get a full reroll of level, gear, spells and talents. Bots above it
+# only get gear upgrades (if AiPlayerbot.RandomGearUpgradeEnabled = 1), unless
+# AiPlayerbot.SyncLevelWithPlayers finds them outside the allowed level range.
+# With AiPlayerbot.DisableRandomLevels = 1 the reroll keeps the bot's current level.
+# 0 disables the full reroll. This does not set the level new bots start at.
+# Also the default for AiPlayerbot.SyncLevelNoPlayer.
+# Default: 5
 #AiPlayerbot.randombotStartingLevel = 5
 
 # Set XP rate for bots (default: 1)
@@ -860,6 +886,8 @@ AiPlayerbot.ShootDistance = 26.0
 #AiPlayerbot.GrindDistance = 75.0
 #overall loot distance
 #AiPlayerbot.LootDistance = 25.0
+#maximum loot distance a player can set per bot with the collect or range loot commands
+#AiPlayerbot.LootDistanceMax = 50.0
 #loot distance when bot is a group member (not leader)
 #AiPlayerbot.GroupMemberLootDistance = 15.0
 #loot distance when bot is a group member (not leader) and has active player master (if player is group leader)
@@ -989,8 +1017,11 @@ AiPlayerbot.RandomBotTeleportDistance = 100
 # Command server port, 0 - disabled
 #AiPlayerbot.CommandServerPort = 8888
 
-AiPlayerbot.PerfMonEnabled = 0
+#Enables performance monitor
+#AiPlayerbot.PerfMonEnabled = 0
 
+# Default action logging history for cdebug history.
+#AiPlayerbot.ActionHistorySize = 0
 
 ##################################################################################
 #                                                                                #
@@ -1021,6 +1052,14 @@ AiPlayerbot.PerfMonEnabled = 0
 
 # The summon command can be used without restriction by non-gms.
 # AiPlayerbot.NonGmFreeSummon = 0
+
+# Cost in copper charged to a non-gm player for each bot added or logged in with the .bot add/login command.
+# The money is taken once the bot is actually online. Random bots, autologin and console adds are never charged.
+# AiPlayerbot.BotAddCost = 0
+
+# Cost in copper charged to a non-gm player each time the summon command brings a bot to that player.
+# Applies on top of AiPlayerbot.NonGmFreeSummon. Meeting stone rituals and short-range unstuck teleports are free.
+# AiPlayerbot.BotSummonCost = 0
 
 # Bots will put their talentspec in guild notes when they change/tell their talents if they have the rights.
 # AiPlayerbot.TalentsInPublicNote = 0

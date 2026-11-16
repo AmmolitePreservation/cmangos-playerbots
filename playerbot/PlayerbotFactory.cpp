@@ -24,6 +24,8 @@
 #endif
 #include "strategy/ItemVisitors.h"
 
+#include <unordered_set>
+
 using namespace ai;
 
 #define PLAYER_SKILL_INDEX(x)       (PLAYER_SKILL_INFO_1_1 + ((x)*3))
@@ -45,6 +47,9 @@ uint32 PlayerbotFactory::tradeSkills[] =
 #ifndef MANGOSBOT_ZERO
 	,
 	SKILL_JEWELCRAFTING
+#endif
+#ifdef MANGOSBOT_TWO
+    , SKILL_INSCRIPTION
 #endif
 };
 
@@ -544,6 +549,56 @@ void PlayerbotFactory::AddConsumables()
    }
 }
 
+// Collects every creature entry that has a world spawn, including the random,
+// conditional and spawn group entries a spawn can resolve to.
+static std::unordered_set<uint32> BuildSpawnedCreatureEntries()
+{
+    std::unordered_set<uint32> entries;
+
+    auto worker = [&entries](CreatureDataPair const& dataPair)
+    {
+        entries.insert(dataPair.second.id);
+#ifdef CMANGOS
+        if (std::vector<uint32> const* randomEntries = sObjectMgr.GetAllRandomCreatureEntries(dataPair.first))
+            entries.insert(randomEntries->begin(), randomEntries->end());
+
+        if (CreatureConditionalSpawn const* cSpawn = ObjectMgr::GetCreatureConditionalSpawn(dataPair.first))
+        {
+            entries.insert(cSpawn->EntryAlliance);
+            entries.insert(cSpawn->EntryHorde);
+        }
+#endif
+        return false;
+    };
+    sObjectMgr.DoCreatureData(worker);
+
+#ifdef CMANGOS
+    if (auto container = sObjectMgr.GetSpawnGroupContainer())
+    {
+        for (auto const& [groupId, group] : container->spawnGroupMap)
+        {
+            if (group.Type != SPAWN_GROUP_CREATURE || group.DbGuids.empty())
+                continue;
+
+            for (SpawnGroupRandomEntry const& randomEntry : group.RandomEntries)
+                entries.insert(randomEntry.Entry);
+        }
+    }
+#endif
+
+    entries.erase(0);
+    return entries;
+}
+
+// Tameable templates without a spawn (test, placeholder and unused rows) can
+// never be tamed by a player, so hunter bots should not get them as pets.
+// Built once on first use; empty spawn data disables the filter.
+static bool HasWorldSpawn(uint32 entry)
+{
+    static std::unordered_set<uint32> const spawnedEntries = BuildSpawnedCreatureEntries();
+    return spawnedEntries.empty() || spawnedEntries.count(entry);
+}
+
 void PlayerbotFactory::InitPet()
 {
     // Randomize a new pet (only for hunters)
@@ -572,6 +627,9 @@ void PlayerbotFactory::InitPet()
                 continue;
 
             if ((int)co->MinLevel > (int)bot->GetLevel())
+                continue;
+
+            if (!HasWorldSpawn(id))
                 continue;
 
 			ids.push_back(id);
@@ -3883,14 +3941,47 @@ void PlayerbotFactory::InitTradeSkills()
 {
     uint16 firstSkill = sRandomPlayerbotMgr.GetValue(bot, "firstSkill");
     uint16 secondSkill = sRandomPlayerbotMgr.GetValue(bot, "secondSkill");
+    uint16 storedFirstSkill = firstSkill;
+    uint16 storedSecondSkill = secondSkill;
+
+    std::vector<uint16> knownPrimarySkills;
+    for (uint32 tradeSkill : tradeSkills)
+    {
+        if (IsPrimaryProfession((uint16)tradeSkill) && bot->HasSkill((uint16)tradeSkill))
+            knownPrimarySkills.push_back((uint16)tradeSkill);
+    }
+
+    uint16 actualFirstSkill = knownPrimarySkills.empty() ? 0 : knownPrimarySkills[0];
+    uint16 actualSecondSkill = knownPrimarySkills.size() < 2 ? 0 : knownPrimarySkills[1];
+
+    if (actualFirstSkill && actualSecondSkill && actualFirstSkill != actualSecondSkill)
+    {
+        firstSkill = actualFirstSkill;
+        secondSkill = actualSecondSkill;
+    }
+    else if (actualFirstSkill)
+    {
+        uint16 storedCompanion = storedFirstSkill == actualFirstSkill ? storedSecondSkill : storedFirstSkill;
+        bool companionWasStored = (storedFirstSkill == actualFirstSkill || storedSecondSkill == actualFirstSkill) && storedCompanion != actualFirstSkill;
+
+        firstSkill = actualFirstSkill;
+        secondSkill = (companionWasStored && IsPrimaryProfession(storedCompanion)) ? storedCompanion : 0;
+    }
+
+    if (firstSkill == secondSkill)
+        secondSkill = 0;
+
     if (!firstSkill || !secondSkill)
     {
+        uint16 preservedFirstSkill = firstSkill;
+        uint16 preservedSecondSkill = secondSkill;
+
         std::vector<uint32> firstSkills;
         std::vector<uint32> secondSkills;
         switch (urand(0, 4))
         {
             case 0:
-                switch (urand(0, 7))
+                switch (urand(0, 5))
                 {
                     case 0:
                         firstSkill = SKILL_HERBALISM;
@@ -3951,14 +4042,54 @@ void PlayerbotFactory::InitTradeSkills()
 #endif
                         secondSkills.push_back(SKILL_ENCHANTING);
                 }
-                firstSkill = firstSkills[urand(0, firstSkills.size() - 1)];
-                secondSkill = secondSkills[urand(0, secondSkills.size() - 1)];
+                if (!firstSkill)
+                    firstSkill = firstSkills[urand(0, firstSkills.size() - 1)];
+                if (!secondSkill)
+                    secondSkill = secondSkills[urand(0, secondSkills.size() - 1)];
                 break;
         }
-        sRandomPlayerbotMgr.SetValue(bot, "firstSkill", firstSkill);
-        sRandomPlayerbotMgr.SetValue(bot, "secondSkill", secondSkill);
+
+        if (preservedFirstSkill)
+            firstSkill = preservedFirstSkill;
+        if (preservedSecondSkill)
+            secondSkill = preservedSecondSkill;
+
+        if (!IsPrimaryProfession(firstSkill))
+            firstSkill = 0;
+        if (!IsPrimaryProfession(secondSkill) || firstSkill == secondSkill)
+            secondSkill = 0;
+
+        if (!firstSkill || !secondSkill)
+        {
+            static const uint16 primarySkills[] = {
+                SKILL_ALCHEMY, SKILL_BLACKSMITHING, SKILL_ENCHANTING,
+                SKILL_ENGINEERING, SKILL_HERBALISM, SKILL_LEATHERWORKING,
+                SKILL_MINING, SKILL_SKINNING, SKILL_TAILORING
+#ifndef MANGOSBOT_ZERO
+                , SKILL_JEWELCRAFTING
+#endif
+#ifdef MANGOSBOT_TWO
+                , SKILL_INSCRIPTION
+#endif
+            };
+
+            for (uint16 candidate : primarySkills)
+            {
+                if (!firstSkill)
+                    firstSkill = candidate;
+                else if (!secondSkill && candidate != firstSkill)
+                    secondSkill = candidate;
+
+                if (firstSkill && secondSkill)
+                    break;
+            }
+        }
     }
 
+    if (firstSkill != storedFirstSkill)
+        sRandomPlayerbotMgr.SetValue(bot, "firstSkill", firstSkill);
+    if (secondSkill != storedSecondSkill)
+        sRandomPlayerbotMgr.SetValue(bot, "secondSkill", secondSkill);
     SetRandomSkill(SKILL_FIRST_AID);
     SetRandomSkill(SKILL_FISHING);
     SetRandomSkill(SKILL_COOKING);
@@ -4109,9 +4240,31 @@ void PlayerbotFactory::UpdateTradeSkills()
     auto pmo = sPerformanceMonitor.start(PERF_MON_RNDBOT, "PlayerbotFactory_Skills2");
     for (int i = 0; i < sizeof(tradeSkills) / sizeof(uint32); ++i)
     {
-        if (bot->GetSkillValue(tradeSkills[i]) == 1)
+        if (bot->GetSkillValue(tradeSkills[i]) == 1 && !IsAssignedProfession((uint16)tradeSkills[i]))
             bot->SetSkill(tradeSkills[i], 0, 0, 0);
     }
+}
+
+bool PlayerbotFactory::IsPrimaryProfession(uint16 id) const
+{
+    SkillLineEntry const* skill = sSkillLineStore.LookupEntry(id);
+    return skill && skill->categoryId == SKILL_CATEGORY_PROFESSION;
+}
+
+bool PlayerbotFactory::IsAssignedProfession(uint16 id) const
+{
+    SkillLineEntry const* skill = sSkillLineStore.LookupEntry(id);
+    if (!skill)
+        return false;
+
+    if (skill->categoryId == SKILL_CATEGORY_SECONDARY)
+        return true;
+
+    if (skill->categoryId != SKILL_CATEGORY_PROFESSION)
+        return false;
+
+    return id == sRandomPlayerbotMgr.GetValue(bot, "firstSkill") ||
+        id == sRandomPlayerbotMgr.GetValue(bot, "secondSkill");
 }
 
 void PlayerbotFactory::InitSkills()
@@ -4269,6 +4422,12 @@ void PlayerbotFactory::SetRandomSkill(uint16 id)
         return;
 
     SkillRangeType skillType = GetSkillRangeType(pSkill, false);
+
+    if (pSkill->categoryId == SKILL_CATEGORY_PROFESSION || pSkill->categoryId == SKILL_CATEGORY_SECONDARY)
+    {
+        if (bot->HasSkill(id))
+            return;
+    }
 
     // if this is not a profession type of skill or skill that is 1/1
     if (skillType != SKILL_RANGE_LEVEL && skillType != SKILL_RANGE_MONO)

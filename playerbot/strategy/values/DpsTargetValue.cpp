@@ -2,17 +2,22 @@
 #include "playerbot/playerbot.h"
 #include "DpsTargetValue.h"
 #include "LeastHpTargetValue.h"
+#include "RtiValue.h"
 
 using namespace ai;
 
 
-Unit* DpsTargetValue::Calculate()
+ObjectGuid DpsTargetValue::Calculate()
 {
-    Unit* rti = RtiTargetValue::Calculate();
+    ObjectGuid ordered = CombatOrderTargetValue::FindTarget(ai, false);
+    if (ordered) return ordered;
+
+    ObjectGuid rti = RtiTargetValue::Calculate();
     if (rti) return rti;
 
     FindLeastHpTargetStrategy strategy(ai);
-    return TargetValue::FindTarget(&strategy);
+    Unit* target = TargetValue::FindTarget(&strategy);
+    return target ? target->GetObjectGuid() : ObjectGuid();
 }
 
 class FindMaxHpTargetStrategy : public FindTargetStrategy
@@ -26,13 +31,6 @@ public:
 public:
     virtual void CheckAttacker(Unit* attacker, ThreatManager* threatManager) override
     {
-        Group* group = ai->GetBot()->GetGroup();
-        if (group)
-        {
-            uint64 guid = group->GetTargetIcon(4);
-            if (guid && attacker->GetObjectGuid() == ObjectGuid(guid))
-                return;
-        }
         if (!result || result->GetHealth() < attacker->GetHealth())
             result = attacker;
     }
@@ -41,11 +39,12 @@ protected:
     float maxHealth;
 };
 
-Unit* DpsAoeTargetValue::Calculate()
+ObjectGuid DpsAoeTargetValue::Calculate()
 {
-    Unit* rti = RtiTargetValue::Calculate();
+    ObjectGuid rti = RtiTargetValue::Calculate();
     if (rti) return rti;
 
     FindMaxHpTargetStrategy strategy(ai);
-    return TargetValue::FindTarget(&strategy);
+    Unit* target = TargetValue::FindTarget(&strategy);
+    return target ? target->GetObjectGuid() : ObjectGuid();
 }

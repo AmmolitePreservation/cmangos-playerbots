@@ -68,6 +68,7 @@ namespace ai
         virtual bool isPossible() { return true; }
         virtual bool isUseful() { return true; }
         virtual bool isUsefulWhenStunned() { return false; }
+        virtual bool IsMovement() { return false; }
         virtual NextAction** getPrerequisites() { return NULL; }
         virtual NextAction** getAlternatives() { return NULL; }
         virtual NextAction** getContinuers() { return NULL; }
@@ -75,7 +76,7 @@ namespace ai
         void Update() {}  //Nonfunctional see AiObjectContext::Update() to enable.
         virtual void Reset() {}
         virtual Unit* GetTarget();
-        virtual Value<Unit*>* GetTargetValue();
+        virtual Value<ObjectGuid>* GetTargetValue();
         virtual std::string GetTargetName() { return "self target"; }
         void MakeVerbose(bool enabled) { verbose = enabled; }
 

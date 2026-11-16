@@ -113,6 +113,10 @@ bool AddAllLootAction::AddLoot(Player* requester, ObjectGuid guid)
 
     float lootDistanceToUse = LootObjectStack::GetPickDistance(bot);
 
+    float customLootDistance = AI_VALUE2(float, "range", "loot");
+    if (customLootDistance >= 0.1f)
+        lootDistanceToUse = customLootDistance;
+
     if (sServerFacade.IsDistanceGreaterThan(sServerFacade.GetDistance2d(requester, wo), lootDistanceToUse))
     {
         ai->TellDebug(requester, ChatHelper::formatWorldobject(wo) + ": outside of loot range " + std::to_string(lootDistanceToUse), "debug loot");

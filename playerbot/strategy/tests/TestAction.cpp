@@ -20,6 +20,7 @@
 #include "CommandQuest.h"
 #include "CleanupParty.h"
 #include "RequireState.h"
+#include "TeleportTests.h"
 
 #include <sstream>
 #include <fstream>
@@ -49,9 +50,15 @@ void TestAction::RegisterCommands()
     commands.push_back(std::make_unique<CommandSetupTeleport>());
     commands.push_back(std::make_unique<CommandSetupGM>());
     commands.push_back(std::make_unique<CommandSetupSetDestination>());
+    commands.push_back(std::make_unique<CommandRequireCreatureAlive>());
+    commands.push_back(std::make_unique<CommandSetupRpgTarget>());
     commands.push_back(std::make_unique<CommandSetupPull>());
     commands.push_back(std::make_unique<CommandSetupGiveItem>());
     commands.push_back(std::make_unique<CommandSetupEquipItem>());
+    commands.push_back(std::make_unique<CommandSpawnMob>());
+    commands.push_back(std::make_unique<CommandFollowFocus>());
+    commands.push_back(std::make_unique<CommandKillFocus>());
+    commands.push_back(std::make_unique<CommandAwaitFocusCorpse>());
     commands.push_back(std::make_unique<CommandSetupClearMobs>());
     commands.push_back(std::make_unique<CommandPartySpawnBot>());
     commands.push_back(std::make_unique<CommandPartyDespawnBot>());
@@ -59,8 +66,9 @@ void TestAction::RegisterCommands()
     commands.push_back(std::make_unique<CommandPartySpawnGroup>());
     commands.push_back(std::make_unique<CommandFlowObserve>());
     commands.push_back(std::make_unique<CommandFlowMonitor>());
-    commands.push_back(std::make_unique<CommandFlowWait>());
+    commands.push_back(std::make_unique<CommandFlowWaitGroup>());
     commands.push_back(std::make_unique<CommandFlowWaitDestination>());
+    commands.push_back(std::make_unique<CommandFlowWait>());
     commands.push_back(std::make_unique<CommandFlowRepeat>());
     commands.push_back(std::make_unique<CommandSetValue>());
     commands.push_back(std::make_unique<CommandDebug>());
@@ -69,7 +77,14 @@ void TestAction::RegisterCommands()
     commands.push_back(std::make_unique<CommandSetupAcceptQuest>());
     commands.push_back(std::make_unique<CommandSetupForceCompleteQuest>());
     commands.push_back(std::make_unique<CommandSetupRewardQuest>());
+    commands.push_back(std::make_unique<CommandSetupForceObjectives>());
     commands.push_back(std::make_unique<CommandSetupDo>());
+    commands.push_back(std::make_unique<CommandSummonRequest>());
+    commands.push_back(std::make_unique<CommandResurrectRequest>());
+    commands.push_back(std::make_unique<CommandKillSpawn>());
+    commands.push_back(std::make_unique<CommandMoveSpawn>());
+    commands.push_back(std::make_unique<CommandEngageSpawn>());
+    commands.push_back(std::make_unique<CommandHideSpawn>());
 }
 
 void TestAction::RegisterMonitors()
@@ -77,6 +92,7 @@ void TestAction::RegisterMonitors()
     monitors.push_back(std::make_unique<MonitorStateDead>());
     monitors.push_back(std::make_unique<MonitorStateTime>());
     monitors.push_back(std::make_unique<MonitorCombatHp>());
+    monitors.push_back(std::make_unique<MonitorNotInCombat>());
     monitors.push_back(std::make_unique<MonitorMovementDistance>());
     monitors.push_back(std::make_unique<MonitorNotOnMap>());
     monitors.push_back(std::make_unique<MonitorMovementUnderground>());
@@ -84,23 +100,35 @@ void TestAction::RegisterMonitors()
     monitors.push_back(std::make_unique<MonitorMovementSpeed>());
     monitors.push_back(std::make_unique<MonitorMovementSpawnDistance>());
     monitors.push_back(std::make_unique<MonitorCombatMob>());
+    monitors.push_back(std::make_unique<MonitorCombatMobHome>());
     monitors.push_back(std::make_unique<MonitorCombatDeadMobs>());
+    monitors.push_back(std::make_unique<MonitorCombatPartyXp>());
     monitors.push_back(std::make_unique<MonitorCombatPartyWiped>());
     monitors.push_back(std::make_unique<MonitorStateFaction>());
     monitors.push_back(std::make_unique<MonitorStateGroupSize>());
+    monitors.push_back(std::make_unique<MonitorStateGroupOnMap>());
     monitors.push_back(std::make_unique<MonitorStateLootGuid>());
     monitors.push_back(std::make_unique<MonitorStateStarterGearCount>());
+    monitors.push_back(std::make_unique<MonitorStateEquippedCount>());
     monitors.push_back(std::make_unique<MonitorStateEquipQuality>());
     monitors.push_back(std::make_unique<MonitorStateAreaLevelDiff>());
     monitors.push_back(std::make_unique<MonitorAiValue>());
+    monitors.push_back(std::make_unique<MonitorStateLootStackNever>());
+    monitors.push_back(std::make_unique<MonitorStateActionSpam>());
     monitors.push_back(std::make_unique<MonitorOutgoingMessage>());
     monitors.push_back(std::make_unique<MonitorQuestComplete>());
     monitors.push_back(std::make_unique<MonitorQuestRewarded>());
+    monitors.push_back(std::make_unique<MonitorQuestTurnedIn>());
+    monitors.push_back(std::make_unique<MonitorNpcDead>());
     monitors.push_back(std::make_unique<MonitorQuestActive>());
     monitors.push_back(std::make_unique<MonitorQuestObjective>());
     monitors.push_back(std::make_unique<MonitorHasItem>());
     monitors.push_back(std::make_unique<MonitorOnMap>());
     monitors.push_back(std::make_unique<MonitorHasMount>());
+    monitors.push_back(std::make_unique<MonitorSpawnOnMap>());
+    monitors.push_back(std::make_unique<MonitorSpawnAlive>());
+    monitors.push_back(std::make_unique<MonitorSpawnResurrected>());
+    monitors.push_back(std::make_unique<MonitorSpawnDead>());
 }
 
 bool TestAction::Execute(Event& event)
@@ -177,6 +205,7 @@ bool TestAction::Execute(Event& event)
 
         TellMaster(std::string("Starting test: ") + ctx.testName);
         LogToConsole(std::string("[TestAction] Bot ") + bot->GetName() + " starting test: " + ctx.testName);
+        LogRunRecord("START", "");
     }
 
     SET_AI_VALUE2(bool, "manual bool", "is running test", true);
@@ -190,6 +219,21 @@ bool TestAction::Execute(Event& event)
 
     if (ctx.observing)
     {
+        // Re-anchor the start position when the test moves the bot to another map (the instance tests
+        // teleport after the baseline was taken at the spawn city) so "distance traveled/wanted" in
+        // timeout messages measures the in-instance anchor instead of a cross-map artifact.
+        if (bot->IsInWorld() && ctx.testStartPosition && bot->GetMapId() != ctx.testStartPosition.getMapId())
+            ctx.testStartPosition = WorldPosition(bot);
+
+        // Capture the party-XP baseline here rather than at test start: the script may still level the
+        // host ("require bot is level") and form the party before observation begins, and both would
+        // count as "gained xp" against a start-of-test baseline.
+        if (!ctx.partyXpCaptured)
+        {
+            ctx.partyXpStart = GetPartyXpTotal(bot);
+            ctx.partyXpCaptured = true;
+        }
+
         bossFocusMgr->Update();
         CheckMonitors();
         if (ctx.result != TestResult::PENDING)
@@ -209,8 +253,8 @@ bool TestAction::Execute(Event& event)
     std::string message;
     TestResult commandResult = ExecuteCommand(ctx.script[ctx.pc], message);
 
-    // Log command execution for boss tests
-    if (ctx.testName.find("scenario_boss") != std::string::npos)
+    // Log command execution for scenario, quest and lab tests
+    if (ctx.testName.find("scenario_") == 0 || ctx.testName.find("quest_") == 0 || ctx.testName.find("lab_") == 0 || ctx.testName.find("lab_micro") == 0)
     {
         std::string result = (commandResult == TestResult::PASS ? "PASS" :
                 commandResult == TestResult::FAIL               ? "FAIL" :
@@ -280,15 +324,15 @@ TestResult TestAction::ExecuteCommand(const std::string& line, std::string& mess
 }
 
 void TestAction::RunCleanup()
-{   
+{
     for (size_t i = static_cast<size_t>(std::max(0, ctx.pc)); i < ctx.script.size(); ++i)
     {
-        std::string message;
-
-        if (!dynamic_cast<TestCleanup*>(commands[i].get()))
+        if (ctx.script[i].find("cleanup ") != 0)
             continue;
 
-        TestResult commandResult = ExecuteCommand(ctx.script[ctx.pc], message);        
+        std::string message;
+        TestResult commandResult = ExecuteCommand(ctx.script[i].substr(8), message);
+        (void)commandResult;
     }
 }
 
@@ -363,6 +407,7 @@ void TestAction::ReportResult()
                           ctx.resultMessage;
     LogToConsole(logLine);
     LogToFile(logLine);
+    LogRunRecord("END", resultStr);
 
     RESET_AI_VALUE2(bool, "manual bool", "is running test");
 
@@ -404,6 +449,41 @@ void TestAction::LogToConsole(const std::string& msg)
 void TestAction::LogToFile(const std::string& msg)
 {
     sPlayerbotAIConfig.log("bot_test_results.log", msg.c_str());
+}
+
+void TestAction::LogRunRecord(const std::string& kind, const std::string& verdict)
+{
+    if (!sPlayerbotAIConfig.hasLog("bot_test_runs.csv"))
+        return;
+
+    if (kind == "END" && !ctx.testStartTime)
+        return;
+
+    auto quoted = [](std::string text)
+    {
+        for (char& c : text)
+            if (c == '"' || c == '\n' || c == '\r')
+                c = c == '"' ? '\'' : ' ';
+        return "\"" + text + "\"";
+    };
+
+    std::string travelTarget;
+    std::string lastAction;
+    if (kind == "END")
+    {
+        lastAction = ai->HandleRemoteCommand("action");
+        TravelTarget* target = AI_VALUE(TravelTarget*, "travel target");
+        if (target && target->GetDestination())
+            travelTarget = target->GetDestination()->GetTitle();
+    }
+
+    std::ostringstream out;
+    out << sPlayerbotAIConfig.GetTimestampStr() << "+00," << time(nullptr) << "," << kind << ",";
+    out << bot->GetObjectGuid().GetCounter() << "," << bot->GetName() << "," << ctx.testName << "," << verdict << ",";
+    out << (kind == "END" && ctx.testStartTime ? WorldTimer::getMSTimeDiff(ctx.testStartTime, WorldTimer::getMSTime()) : 0) << ",";
+    out << sPlayerbotAIConfig.LocationColumns(bot) << ",";
+    out << quoted(kind == "END" ? ctx.resultMessage : "") << "," << quoted(lastAction) << "," << quoted(travelTarget);
+    sPlayerbotAIConfig.logRaw("bot_test_runs.csv", out.str());
 }
 
 void TestAction::DeactivateStrategy()

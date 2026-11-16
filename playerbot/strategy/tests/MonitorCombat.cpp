@@ -27,6 +27,17 @@ bool MonitorCombatHp::IsConditionMet(const std::string& monitorStr, Player* bot,
     return hp > threshold;
 }
 
+bool MonitorNotInCombat::IsConditionMet(const std::string& monitorStr, Player* bot, TestContext& ctx) const
+{
+    if (bot->IsInCombat())
+    {
+        ctx.combatSeen = true;
+        return false;
+    }
+
+    return ctx.combatSeen;
+}
+
 bool MonitorCombatMob::IsConditionMet(const std::string& monitorStr, Player* bot, TestContext& ctx) const
 {
     // monitorStr has "mob" prefix already stripped, e.g. " 11520 is dead => pass ..."
@@ -45,7 +56,7 @@ bool MonitorCombatMob::IsConditionMet(const std::string& monitorStr, Player* bot
     std::list<Creature*> creatures;
     MaNGOS::AnyUnitInObjectRangeCheck checker(bot, 500.0f);
     MaNGOS::CreatureListSearcher<MaNGOS::AnyUnitInObjectRangeCheck> searcher(creatures, checker);
-    Cell::VisitWorldObjects(bot, searcher, 500.0f);
+    Cell::VisitAllObjects(bot, searcher, 500.0f);
 
     bool found = false;
     bool allDead = true;
@@ -85,6 +96,101 @@ bool MonitorCombatMob::IsConditionMet(const std::string& monitorStr, Player* bot
     return false;
 }
 
+bool MonitorCombatMobHome::IsConditionMet(const std::string& monitorStr, Player* bot, TestContext& ctx) const
+{
+    size_t entryEnd = monitorStr.find("is home");
+
+    if (entryEnd == std::string::npos)
+        return false;
+
+    std::string entryStr = monitorStr.substr(0, entryEnd);
+    uint32 entryId = atoi(entryStr.c_str());
+
+    if (!entryId)
+        return false;
+
+    float threshold = 5.0f;
+    size_t thresholdPos = monitorStr.find_first_not_of(' ', entryEnd + 7);
+    if (thresholdPos != std::string::npos)
+    {
+        float parsed = atof(monitorStr.c_str() + thresholdPos);
+        if (parsed > 0.0f)
+            threshold = parsed;
+    }
+
+    std::list<Creature*> creatures;
+    MaNGOS::AnyUnitInObjectRangeCheck checker(bot, 500.0f);
+    MaNGOS::CreatureListSearcher<MaNGOS::AnyUnitInObjectRangeCheck> searcher(creatures, checker);
+    Cell::VisitAllObjects(bot, searcher, 500.0f);
+
+    auto& objectStore = bot->GetMap()->GetObjectsStore();
+    bool found = false;
+    bool foundAlive = false;
+    bool anyCombat = false;
+    bool tooFar = false;
+
+    for (auto& creature : creatures)
+    {
+        if (creature->GetEntry() != entryId)
+            continue;
+
+        found = true;
+
+        if (!creature->IsAlive())
+            continue;
+
+        foundAlive = true;
+
+        if (creature->IsInCombat())
+        {
+            ctx.combatSeen = true;
+            anyCombat = true;
+        }
+        else
+        {
+            float rx, ry, rz;
+            creature->GetRespawnCoord(rx, ry, rz);
+            if (creature->GetDistance2d(rx, ry, DIST_CALC_NONE) > threshold * threshold)
+                tooFar = true;
+        }
+    }
+
+    if (!found)
+    {
+        for (auto itr = objectStore.begin<Creature>(); itr != objectStore.end<Creature>(); ++itr)
+        {
+            Creature* creature = itr->second;
+            if (!creature || creature->GetEntry() != entryId)
+                continue;
+
+            found = true;
+
+            if (!creature->IsAlive())
+                continue;
+
+            foundAlive = true;
+
+            if (creature->IsInCombat())
+            {
+                ctx.combatSeen = true;
+                anyCombat = true;
+            }
+            else
+            {
+                float rx, ry, rz;
+                creature->GetRespawnCoord(rx, ry, rz);
+                if (creature->GetDistance2d(rx, ry, DIST_CALC_NONE) > threshold * threshold)
+                    tooFar = true;
+            }
+        }
+    }
+
+    if (anyCombat || tooFar)
+        return false;
+
+    return foundAlive && ctx.combatSeen;
+}
+
 bool MonitorCombatPartyWiped::IsConditionMet(const std::string& monitorStr, Player* bot, TestContext& ctx) const
 {
     Group* group = bot->GetGroup();
@@ -107,17 +213,23 @@ bool MonitorCombatPartyWiped::IsConditionMet(const std::string& monitorStr, Play
 
 bool MonitorCombatDeadMobs::IsConditionMet(const std::string& monitorStr, Player* bot, TestContext& ctx) const
 {
+    // Sweep a wide radius around the bot and latch every dead creature GUID into ctx. A corpse only
+    // needs to be observed once: bots loot kills almost immediately, so simultaneous-corpses counts
+    // collapse to 0-2 in sparse-start instances even though the party is killing continuously.
     std::list<Creature*> creatures;
-    MaNGOS::AnyUnitInObjectRangeCheck checker(bot, 120.0f);
-    MaNGOS::CreatureListSearcher<MaNGOS::AnyUnitInObjectRangeCheck> searcher(creatures, checker);
-    Cell::VisitWorldObjects(bot, searcher, 120.0f);
+    // GetDistance(..., DIST_CALC_NONE) returns the SQUARED distance, so the checker range must be
+    // squared too; VisitAllObjects keeps the linear radius for the cell visit.
+    MaNGOS::AnyUnitFulfillingConditionInRangeCheck checker(bot, [](Unit* u) { return !u->IsAlive(); }, 300.0f * 300.0f, DIST_CALC_NONE);
+    MaNGOS::CreatureListSearcher<MaNGOS::AnyUnitFulfillingConditionInRangeCheck> searcher(creatures, checker);
+    Cell::VisitAllObjects(bot, searcher, 300.0f);
 
-    uint32 deadCount = 0;
     for (auto& creature : creatures)
     {
-        if (!creature->IsAlive())
-            deadCount++;
+        if (!creature->IsAlive() && !creature->IsPet() && !creature->IsTotem())
+            ctx.observedDeadMobs.insert(creature->GetObjectGuid());
     }
+
+    uint32 deadCount = static_cast<uint32>(ctx.observedDeadMobs.size());
 
     std::string valueName;
     std::string op;
@@ -135,4 +247,31 @@ bool MonitorCombatDeadMobs::IsConditionMet(const std::string& monitorStr, Player
 
     return deadCount < threshold;
 
+}
+
+bool MonitorCombatPartyXp::IsConditionMet(const std::string& monitorStr, Player* bot, TestContext& ctx) const
+{
+    if (!ctx.partyXpCaptured)
+        return false;
+
+    uint64 current = GetPartyXpTotal(bot);
+    uint64 start = ctx.partyXpStart;
+    // Members can leave (or be logged out) mid-run and drop the summed total below the baseline.
+    uint64 gained = current > start ? current - start : 0;
+
+    std::string valueName;
+    std::string op;
+    std::string valueStr;
+    std::string parseMessage;
+    if (TryParseComparisonValue(monitorStr, valueName, op, valueStr, parseMessage, GetName()) != TestResult::PASS)
+        return false;
+
+    uint32 threshold = 0;
+    if (TryParseUInt32Strict(valueStr, threshold, parseMessage, GetName()) != TestResult::PASS)
+        return false;
+
+    if (op == ">")
+        return gained > threshold;
+
+    return gained < threshold;
 }

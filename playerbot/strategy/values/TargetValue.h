@@ -65,10 +65,7 @@ namespace ai
         virtual std::vector<std::string> GetUsedValues() { return {}; }
 #endif 
 
-        virtual std::string Format() override
-        {
-            return chat->formatGuidPosition(value, bot);
-        }
+        virtual std::string Format() override;
     };
 
     class TravelTargetValue : public ManualSetValue<TravelTarget*>
@@ -101,6 +98,12 @@ namespace ai
         TalkTargetValue(PlayerbotAI* ai, std::string name = "talk target") : ManualSetValue<ObjectGuid>(ai, ObjectGuid(), name) {}
     };
 
+    class FetchTargetValue : public ManualSetValue<ObjectGuid>
+    {
+    public:
+        FetchTargetValue(PlayerbotAI* ai, std::string name = "fetch target") : ManualSetValue<ObjectGuid>(ai, ObjectGuid(), name) {}
+    };
+
     class AttackTargetValue : public ManualSetValue<ObjectGuid>
     {
     public:
@@ -110,9 +113,9 @@ namespace ai
     class PullTargetValue : public UnitManualSetValue
     {
     public:
-        PullTargetValue(PlayerbotAI* ai, std::string name = "pull target") : UnitManualSetValue(ai, nullptr, name) {}
-        void Set(Unit* unit) override;
-        Unit* Get() override;
+        PullTargetValue(PlayerbotAI* ai, std::string name = "pull target") : UnitManualSetValue(ai, ObjectGuid(), name) {}
+        void Set(ObjectGuid unitGuid) override;
+        ObjectGuid Get() override;
 
     private:
         ObjectGuid guid;
@@ -122,7 +125,7 @@ namespace ai
     {
     public:
         FollowTargetValue(PlayerbotAI* ai, std::string name = "follow target") : UnitCalculatedValue(ai, name) {}
-        Unit* Calculate() override;
+        ObjectGuid Calculate() override;
     };
 
     class ManualFollowTargetValue : public GuidPositionManualSetValue
@@ -135,7 +138,7 @@ namespace ai
     {
     public:
         ClosestAttackerTargetingMeTargetValue(PlayerbotAI* ai, std::string name = "closest attacker targeting me") : UnitCalculatedValue(ai, name) {}
-        Unit* Calculate() override;
+        ObjectGuid Calculate() override;
     };
 
     class FriendlyManualTargetsValue : public ManualSetValue<std::list<ObjectGuid>>

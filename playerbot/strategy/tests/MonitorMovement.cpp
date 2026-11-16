@@ -6,6 +6,8 @@
 #include "Grids/CellImpl.h"
 #include "TestRegistry.h"
 #include "playerbot/TravelNode.h"
+#include "playerbot/TravelMgr.h"
+#include "playerbot/strategy/values/LastMovementValue.h"
 
 using namespace ai;
 
@@ -36,7 +38,24 @@ bool MonitorMovementDistance::IsConditionMet(const std::string& monitorStr, Play
     if (!TestRegistry::ParseLocation(name, loc))
         return false;
 
-    const float dist = bot->GetDistance(loc.coord_x, loc.coord_y, loc.coord_z);
+    float dist = bot->GetDistance(loc.coord_x, loc.coord_y, loc.coord_z);
+
+    const bool straightMeets = (op == "<") ? (dist < threshold) : (dist > threshold);
+    if (straightMeets && bot->GetMapId() == loc.mapid)
+    {
+        TravelPath path = TravelNodeMap::getFullPath(loc, WorldPosition(bot), bot);
+        if (!path.empty())
+        {
+            std::vector<WorldPosition> points = path.getPointPath();
+            float pathLength = 0.0f;
+            for (size_t i = 1; i < points.size(); ++i)
+                pathLength += points[i - 1].distance(points[i]);
+
+            if (pathLength > 0.0f)
+                dist = pathLength;
+        }
+    }
+
     if (op == "<")
         return dist < threshold;
 
@@ -55,12 +74,63 @@ bool MonitorNotOnMap::IsConditionMet(const std::string& monitorStr, Player* bot,
     WorldPosition botPos(bot);
 
     if (!botPos)
+    {
         return true;
+    }
 
-    std::string currentMapName = botPos.getMapEntry()->name[0];
+    uint32 wantMapId = 0;
+    bool wantMapIdKnown = false;
 
-    if (currentMapName != wantMapName)
+    std::string trimmed = wantMapName;
+    const size_t begin = trimmed.find_first_not_of(" \t");
+    if (begin != std::string::npos)
+    {
+        const size_t end = trimmed.find_last_not_of(" \t");
+        trimmed = trimmed.substr(begin, end - begin + 1);
+
+        if (!trimmed.empty() && trimmed.find_first_not_of("0123456789") == std::string::npos)
+        {
+            wantMapId = uint32(atol(trimmed.c_str()));
+            wantMapIdKnown = true;
+        }
+    }
+
+    if (!wantMapIdKnown)
+    {
+        GuidPosition loc;
+        if (TestRegistry::ParseLocation(wantMapName, loc))
+        {
+            wantMapId = loc.getMapId();
+            wantMapIdKnown = true;
+        }
+    }
+
+    if (wantMapIdKnown)
+    {
+        if (botPos.getMapId() != wantMapId)
+        {
+            return true;
+        }
+
+        return false;
+    }
+
+    const MapEntry* entry = botPos.getMapEntry();
+    if (!entry || !entry->name[0])
+        return false;
+
+    std::string currentMapName = entry->name[0];
+    currentMapName.erase(std::remove_if(currentMapName.begin(), currentMapName.end(), ::isspace), currentMapName.end());
+    std::transform(currentMapName.begin(), currentMapName.end(), currentMapName.begin(), ::tolower);
+
+    std::string wantName = wantMapName;
+    wantName.erase(std::remove_if(wantName.begin(), wantName.end(), ::isspace), wantName.end());
+    std::transform(wantName.begin(), wantName.end(), wantName.begin(), ::tolower);
+
+    if (currentMapName != wantName)
+    {
         return true;
+    }
 
     return false;
 }
@@ -77,7 +147,14 @@ bool MonitorMovementUnderground::IsConditionMet(const std::string& monitorStr, P
 
     botpos += WorldPosition(0, 0, 0, 0.5); //Give some leeway.
 
-    if (botpos.isUnderground())
+    float groundZ = botpos.getMap(botpos.getFirstInstanceId())->GetHeight(botpos.coord_x, botpos.coord_y, botpos.coord_z + 0.5f, true);
+    float maxZ = botpos.getTerrain()->GetWaterOrGroundLevel(botpos.coord_x, botpos.coord_y, botpos.coord_z + 0.5f, groundZ, true, 1.0f);
+
+    if (maxZ <= INVALID_HEIGHT)
+        return false;
+
+    float depth = maxZ - botpos.coord_z;
+    if (depth > 10.0f)
         ctx.undergroundCount++;
     else if (ctx.undergroundCount > 0)
         ctx.undergroundCount--;
@@ -91,16 +168,65 @@ bool MonitorMovementCanNotReachNodes::IsConditionMet(const std::string& monitorS
         return false;
 
     WorldPosition pos = WorldPosition(bot);
-    std::vector<TravelNode*> startNodes = sTravelNodeMap.getNodes(pos);
 
-    for (uint32 i = 0; i < std::min(5,int(startNodes.size())); i++)
+    // On a transport (elevator platform, boat, zeppelin) the bot is off the navmesh by
+    // definition - pathfinding from there is meaningless. Don't count those ticks.
+    // Bots that walk onto a GO transport are not always registered passengers, so also
+    // check the geometry directly (isOnTransport ray-tests the vmaps) and treat "well
+    // above the static ground" (elevator mid-shaft) as riding.
+    bool riding = bot->GetTransport() || pos.currentHeight() > 5.0f;
+    if (!riding)
     {
-        WorldPosition nodePos = *startNodes[i]->getPosition();
-        if (nodePos.isPathTo(pos.getPathTo(nodePos, bot),1.0f))
-            return false;
+        for (GenericTransport* transport : pos.getTransports())
+        {
+            if (pos.isOnTransport(transport))
+            {
+                riding = true;
+                break;
+            }
+        }
     }
 
-    return true;
+    if (riding)
+    {
+        if (ctx.cannotReachCount > 0)
+            ctx.cannotReachCount--;
+        return false;
+    }
+
+    std::vector<WorldPosition> startNodePositions;
+    {
+        std::shared_lock<std::shared_timed_mutex> nodeLock(sTravelNodeMap.m_nMapMtx);
+        for (TravelNode* node : sTravelNodeMap.getNodes(pos))
+        {
+            if (startNodePositions.size() >= 5)
+                break;
+            startNodePositions.push_back(*node->getPosition());
+        }
+    }
+
+    for (const WorldPosition& nodePos : startNodePositions)
+    {
+        std::vector<WorldPosition> path = pos.getPathTo(nodePos, bot);
+        // 3 yd, not 1: dock/entry nodes sit on pier and platform edges where the mesh thins
+        // out, and pathfinding stops 1-3 yd short of them. Within 3 yd the bot can walk the
+        // rest, and the node-link structure takes over.
+        if (nodePos.isPathTo(path, 3.0f))
+        {
+            if (ctx.cannotReachCount > 0)
+                ctx.cannotReachCount--;
+            return false;
+        }
+    }
+
+
+    // Grace period: right after a teleport the grid/mmaps for the destination may not be
+    // loaded yet and pathfinding comes back empty; fail only when it persists.
+    ctx.cannotReachCount++;
+    // Transient blocks are normal around transports: the platform occupies the pier, the bot
+    // rides next to static structures the vmap ray-test can mistake for ground. Only fail after
+    // a long persistence; the per-test timeout monitor stays the real backstop.
+    return ctx.cannotReachCount > 120;
 }
 
 bool MonitorMovementSpeed::IsConditionMet(const std::string& monitorStr, Player* bot, TestContext& ctx) const

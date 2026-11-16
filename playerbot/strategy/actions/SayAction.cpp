@@ -25,8 +25,8 @@ bool SayAction::Execute(Event& event)
 {
     std::string text = "";
     std::map<std::string, std::string> placeholders;
-    Unit* target = AI_VALUE(Unit*, "tank target");
-    if (!target) target = AI_VALUE(Unit*, "current target");
+    Unit* target = ai->GetUnit(AI_VALUE(ObjectGuid, "tank target"));
+    if (!target) target = ai->GetUnit(AI_VALUE(ObjectGuid, "current target"));
 
     // set replace std::strings
     if (target) placeholders["<target>"] = target->GetName();
@@ -714,7 +714,10 @@ bool ChatReplyAction::HandleToxicLinksReply(Player* bot, ChatChannelSource chatC
             continue;
 
         QuestStatus status = bot->GetQuestStatus(questId);
-        if (status == QUEST_STATUS_INCOMPLETE || status == QUEST_STATUS_NONE)
+        // Skip ids with no template: the pick below formats the template and
+        // would dereference null.
+        if ((status == QUEST_STATUS_INCOMPLETE || status == QUEST_STATUS_NONE)
+            && sObjectMgr.GetQuestTemplate(questId))
             incompleteQuests.push_back(questId);
     }
 
@@ -901,7 +904,10 @@ bool ChatReplyAction::HandleLFGQuestsReply(Player* bot, ChatChannelSource chatCh
     std::set<uint32> matchingQuestIds;
     for (auto botQuestId : botQuestIds)
     {
-        if (messageQuestIds.count(botQuestId) != 0)
+        // Only ids that still resolve: the reply below formats every match, so a
+        // set holding nothing formattable would answer with an empty quest list
+        // and still consume the message.
+        if (messageQuestIds.count(botQuestId) != 0 && sObjectMgr.GetQuestTemplate(botQuestId))
         {
             matchingQuestIds.insert(botQuestId);
         }

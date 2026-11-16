@@ -6,6 +6,7 @@
 #include "playerbot/RandomPlayerbotMgr.h"
 #include "playerbot/ServerFacade.h"
 #include "playerbot/TravelMgr.h"
+#include "playerbot/WorldPosition.h"
 #include "Chat/ChannelMgr.h"
 #include "Social/SocialMgr.h"
 #include "Accounts/AccountMgr.h"
@@ -75,7 +76,9 @@ PlayerbotHolder::PlayerbotHolder() : PlayerbotAIBase()
     m_botCommandHandlers["c"] = &PlayerbotHolder::HandleBotC;
     m_botCommandHandlers["w"] = &PlayerbotHolder::HandleConsoleWhisper;
     m_botCommandHandlers["cmd"] = &PlayerbotHolder::HandleConsoleCmd;
+#ifdef GenerateBotTests
     m_botCommandHandlers["test"] = &PlayerbotHolder::HandleBotTest;
+#endif
     m_botCommandHandlers["do"] = &PlayerbotHolder::HandleBotDo;
     m_botCommandHandlers["record"] = &PlayerbotHolder::HandleBotRecord;
     m_botCommandHandlers["read"] = &PlayerbotHolder::HandleBotRead;
@@ -521,6 +524,66 @@ void PlayerbotHolder::OnBotLogin(Player * const bot)
 #endif
             bot->StoreNewItemInBestSlots(6948, 1);
     }
+
+    PurgeExpiredBotAddCharges(time(nullptr));
+
+    auto addCharge = pendingBotAddCharges.find(bot->GetGUIDLow());
+    if (addCharge != pendingBotAddCharges.end())
+    {
+        PendingBotAddCharge charge = addCharge->second;
+        pendingBotAddCharges.erase(addCharge);
+
+        Player* payer = sObjectMgr.GetPlayer(charge.payer);
+        if (payer && payer->GetMoney() >= charge.cost)
+        {
+            payer->ModifyMoney(-int32(charge.cost));
+            ChatHandler(payer).PSendSysMessage("Paid %s to add %s.", ChatHelper::formatMoney(charge.cost).c_str(), bot->GetName());
+        }
+        else
+        {
+            if (payer)
+                ChatHandler(payer).PSendSysMessage("You need %s to add a bot.", ChatHelper::formatMoney(charge.cost).c_str());
+
+            ai->SetShouldLogOut(true);
+        }
+    }
+}
+
+void PlayerbotHolder::PurgeExpiredBotAddCharges(time_t now)
+{
+    for (auto pending = pendingBotAddCharges.begin(); pending != pendingBotAddCharges.end();)
+    {
+        if (now - pending->second.requested > botAddChargeTimeout)
+            pending = pendingBotAddCharges.erase(pending);
+        else
+            ++pending;
+    }
+}
+
+bool PlayerbotHolder::ReserveBotAddCost(Player* master, uint32 botGuid, std::string& error)
+{
+    uint32 addCost = (chargeBotAddCost && master && master->GetSession()->GetSecurity() <= SEC_PLAYER) ? sPlayerbotAIConfig.botAddCost : 0;
+    if (!addCost)
+        return true;
+
+    time_t now = time(nullptr);
+    PurgeExpiredBotAddCharges(now);
+
+    uint64 reserved = 0;
+    for (auto& pending : pendingBotAddCharges)
+    {
+        if (pending.second.payer == master->GetObjectGuid() && pending.first != botGuid)
+            reserved += pending.second.cost;
+    }
+
+    if (uint64(master->GetMoney()) < reserved + addCost)
+    {
+        error = "You need " + ChatHelper::formatMoney(addCost) + " to add a bot.";
+        return false;
+    }
+
+    pendingBotAddCharges[botGuid] = { master->GetObjectGuid(), addCost, now };
+    return true;
 }
 
 std::string PlayerbotHolder::ProcessBotCommand(std::string cmd, ObjectGuid guid, ObjectGuid masterguid, bool admin, uint32 masterAccountId, uint32 masterGuildId, const std::string param)
@@ -596,7 +659,19 @@ bool PlayerbotMgr::HandlePlayerbotMgrCommand(ChatHandler* handler, char const* a
         return false;
     }
 
-    std::list<std::string> messages = mgr->HandlePlayerbotCommand(args, player);
+    struct ChargeBotAddCostScope
+    {
+        PlayerbotHolder* holder;
+        explicit ChargeBotAddCostScope(PlayerbotHolder* h) : holder(h) { holder->SetChargeBotAddCost(true); }
+        ~ChargeBotAddCostScope() { holder->SetChargeBotAddCost(false); }
+    };
+
+    std::list<std::string> messages;
+    {
+        ChargeBotAddCostScope chargeScope(mgr);
+        messages = mgr->HandlePlayerbotCommand(args, player);
+    }
+
     if (messages.empty())
         return true;
 
@@ -806,6 +881,8 @@ uint32 PlayerbotHolder::GetAccountId(std::string name)
 {
     uint32 accountId = 0;
 
+    // name comes from chat (".bot add <name>")
+    LoginDatabase.escape_string(name);
     auto results = LoginDatabase.PQuery("SELECT id FROM account WHERE username = '%s'", name.c_str());
     if(results)
     {
@@ -1468,6 +1545,12 @@ std::string PlayerbotHolder::HandleConsoleCmd(Player* bot, Player* master, const
     if (!ai)
         return "Bot has no AI";
 
+    if (param.compare(0, 5, "chat ") == 0)
+    {
+        ai->HandleCommand(CHAT_MSG_WHISPER, param.substr(5), *(master ? master : bot));
+        return "Sending chat command " + param.substr(5) + " to player " + bot->GetName();
+    }
+
     ExternalEventHelper helper(ai->GetAiObjectContext());
 
     std::string msg = "Sending command " + param + " to player " + bot->GetName();
@@ -1480,6 +1563,7 @@ std::string PlayerbotHolder::HandleConsoleCmd(Player* bot, Player* master, const
     return msg;
 }
 
+#ifdef GenerateBotTests
 std::string PlayerbotHolder::HandleBotTest(Player* bot, Player* master, const std::string param)
 {
     if (!bot)
@@ -1494,12 +1578,11 @@ std::string PlayerbotHolder::HandleBotTest(Player* bot, Player* master, const st
         return "Usage: test <testName>. Available tests: walk_to_ironforge, flight_ratchet_to_booty_bay";
     }
 
-    // Activate test strategy which will run the test over multiple ticks
-    std::string strategyName = "test::" + param;
-    ai->ChangeStrategy("+" + strategyName, BotState::BOT_STATE_NON_COMBAT);
-    
+    TestRegistry::StartTest(ai, param);
+
     return "Test '" + param + "' started for bot " + bot->GetName();
 }
+#endif
 
 std::string PlayerbotHolder::HandleBotDo(Player* bot, Player* master, const std::string param)
 {
@@ -1515,26 +1598,27 @@ std::string PlayerbotHolder::HandleBotDo(Player* bot, Player* master, const std:
 
     Action* action = nullptr;
 
-    size_t i = std::string::npos;
+    std::string probe = param;
     while (true)
     {
-        action = ai->GetAiObjectContext()->GetAction(param);
+        action = ai->GetAiObjectContext()->GetAction(probe);
 
         if (action)
             break;
 
-        size_t found = param.rfind(" ", i);
+        size_t found = probe.rfind(' ');
         if (found == std::string::npos || !found)
             break;
 
-        actionName = param.substr(0, found);
-        subparam = param.substr(found + 1);
-
-        i = found - 1;
+        actionName = probe.substr(0, found);
+        probe = actionName;
     }
 
     if (!action)
         return "action not found";
+
+    if (param.size() > probe.size() && param.compare(0, probe.size(), probe) == 0 && param[probe.size()] == ' ')
+        subparam = param.substr(probe.size() + 1);
 
     ai->RecordMessages(true, true);
 
@@ -1821,10 +1905,18 @@ std::string PlayerbotHolder::HandleBotAddLogin(Player* bot, Player* master, cons
     bool isMasterAccount = (masterAccountId == botAccount);
     bool isRandomAccount = sPlayerbotAIConfig.IsInRandomAccountList(botAccount);
 
-    if (isRandomAccount)
+    bool ownAccountOnly = sPlayerbotAIConfig.IsPartyBotOnly();
+
+    if (isRandomAccount && !ownAccountOnly)
         sRandomPlayerbotMgr.AddRandomBot(guid);
-    else if (isMasterAccount || sPlayerbotAIConfig.allowMultiAccountAltBots)
+    else if (isMasterAccount || (!ownAccountOnly && sPlayerbotAIConfig.allowMultiAccountAltBots))
+    {
+        std::string costError;
+        if (!ReserveBotAddCost(master, guid.GetCounter(), costError))
+            return costError;
+
         AddPlayerBot(guid, masterAccountId);
+    }
     else
         return "Not in your account";
 
@@ -1933,7 +2025,9 @@ void PlayerbotHolder::CreateBot(Player* master, const std::string param, std::li
 
     if (!name.empty())
     {
-        auto result = CharacterDatabase.PQuery("SELECT guid FROM characters WHERE name = '%s'", name.c_str());
+        std::string sqlName = name;
+        CharacterDatabase.escape_string(sqlName);
+        auto result = CharacterDatabase.PQuery("SELECT guid FROM characters WHERE name = '%s'", sqlName.c_str());
         if (result)
         {
             messages.push_back("Name already exists");
@@ -1962,6 +2056,9 @@ void PlayerbotHolder::CreateBot(Player* master, const std::string param, std::li
         RandomPlayerbotFactory::NameRaceAndGender raceAndGender = RandomPlayerbotFactory::CombineRaceAndGender(gender, race);
         name = RandomPlayerbotFactory::CreateRandomBotName(raceAndGender);
     }
+
+    // Randomize appearance (skin/face/hair) so same-race/gender bots don't all look alike.
+    RandomPlayerbotFactory::RandomizeAppearance(race, gender, skin, face, hairStyle, hairColor, facialHair);
 
     WorldSession* botSession = new WorldSession(accountId, NULL, SEC_PLAYER,
 #ifdef MANGOSBOT_TWO
@@ -2016,11 +2113,12 @@ void PlayerbotHolder::CreateBot(Player* master, const std::string param, std::li
             ChangeTalentsAction::AutoSelectTalents(newBot, &out, role);
 
             sRandomPlayerbotMgr.SetValue(botGuid, "create levelup", 1);
-            sRandomPlayerbotMgr.SetValue(botGuid, "create group", 1, groupWith);
-            sRandomPlayerbotMgr.SetValue(botGuid, "create gear", 1, gear);
         }
         else
             newBot->SetLevel(1);
+
+        sRandomPlayerbotMgr.SetValue(botGuid, "create group", 1, groupWith);
+        sRandomPlayerbotMgr.SetValue(botGuid, "create gear", 1, gear);
 
         if (!testName.empty())
         {
@@ -2033,10 +2131,22 @@ void PlayerbotHolder::CreateBot(Player* master, const std::string param, std::li
             sRandomPlayerbotMgr.SetValue(botGuid, "temporary", 1, name);
         }
 
-        if (master)
+        const bool hasMaster = (master != nullptr);
+        uint32 masterMapId = 0;
+        float masterX = 0.0f, masterY = 0.0f, masterZ = 0.0f, masterO = 0.0f;
+        if (hasMaster)
         {
-            newBot->SetMap(master->GetMap());
-            newBot->SetPosition(master->GetPositionX(), master->GetPositionY(), master->GetPositionZ(), master->GetOrientation());
+            masterMapId = master->GetMapId();
+            masterX = master->GetPositionX();
+            masterY = master->GetPositionY();
+            masterZ = master->GetPositionZ();
+            masterO = master->GetOrientation();
+        }
+
+        if (hasMaster)
+        {
+            newBot->GetTeleportDest() = WorldLocation(masterMapId, masterX, masterY, masterZ, masterO);
+            newBot->SetSemaphoreTeleportNear(true);
         }
 
         newBot->SaveToDB();
@@ -2050,8 +2160,22 @@ void PlayerbotHolder::CreateBot(Player* master, const std::string param, std::li
 
         if (autoAdd)
         {
-            sPlayerbotAIConfig.freeAltBots.push_back(std::make_pair(accountId, botGuid));
-            messages.push_back("Bot is now online");
+            std::string costError;
+            if (sPlayerbotAIConfig.IsPartyBotOnly() && !ReserveBotAddCost(master, botGuid, costError))
+            {
+                messages.push_back(costError);
+                messages.push_back("Use '.bot add " + name + "' to bring this bot online");
+            }
+            else if (sPlayerbotAIConfig.IsPartyBotOnly())
+            {
+                AddPlayerBot(botGuid, accountId);
+                messages.push_back("Bot is now online");
+            }
+            else
+            {
+                sPlayerbotAIConfig.freeAltBots.push_back(std::make_pair(accountId, botGuid));
+                messages.push_back("Bot is now online");
+            }
         }
         else
         {
@@ -2113,7 +2237,7 @@ std::list<std::string> PlayerbotHolder::HandleGroup(Player* master, const std::s
 
     RandomPlayerbotFactory factory(0);
 
-    uint32 maxTries = 10*groupSize;
+    uint32 maxTries = 100*groupSize;
 
     uint32 botsCreated = 0;
     uint32 continue_role = 0, continue_race = 0, continue_class = 0;
@@ -2125,13 +2249,18 @@ std::list<std::string> PlayerbotHolder::HandleGroup(Player* master, const std::s
         if (!maxTries)
             break;
 
-        BotRoles role = BotRoles(urand(BotRoles::BOT_ROLE_TANK, BotRoles::BOT_ROLE_DPS));
-
-        if (allowedClassNr[0][role] == 0)
+        static const BotRoles roleValues[] = { BOT_ROLE_TANK, BOT_ROLE_HEALER, BOT_ROLE_DPS };
+        std::vector<BotRoles> availableRoles;
+        for (BotRoles candidate : roleValues)
         {
-            continue_role++;
-            continue;
+            if (allowedClassNr[0][candidate] > 0)
+                availableRoles.push_back(candidate);
         }
+
+        if (availableRoles.empty())
+            break;
+
+        BotRoles role = availableRoles[urand(0, (uint32)availableRoles.size() - 1)];
 
         uint8 cls = factory.GetRandomClass(0, role);
 
@@ -2158,17 +2287,14 @@ std::list<std::string> PlayerbotHolder::HandleGroup(Player* master, const std::s
         paramStr << "level=" << masterLevel << " class=" << ChatHelper::formatClass(cls) << " group=" << master->GetName() << " " << passThroughParam; //Passthrough will override.
 
         auto result = HandleCreate(master, paramStr.str(), security);
+        bool created = !result.empty() && result.front().find("Bot created:") == 0;
         messages.splice(messages.end(), result);
 
-        if (!messages.empty())
+        if (created)
         {
-            auto lastMsg = messages.front();
-            if (lastMsg.find("Bot created:") != std::string::npos)
-            {
-                classesCreated[cls]++;
-                botsCreated++;
-                currentGroupSize++;
-            }
+            classesCreated[cls]++;
+            botsCreated++;
+            currentGroupSize++;
         }
     
         allowedClassNr[0][role]--; 
@@ -2195,6 +2321,29 @@ std::list<std::string> PlayerbotHolder::HandleRunTest(Player* master, const std:
 {    
     std::list<std::string> messages;
     static constexpr size_t maxListLines = 200;
+
+    if (param == "pending")
+    {
+        std::lock_guard<std::mutex> lock(testResultsMutex);
+        if (pendingTests.empty())
+            messages.push_back("pendingTests: empty");
+        else
+        {
+            messages.push_back("pendingTests: " + std::to_string(pendingTests.size()));
+            for (const auto& pt : pendingTests)
+            {
+                const char* state = pt.completed ? "completed" : (pt.pending ? "in-flight" : "waiting");
+                std::string res = pt.result.empty() ? "" : ("\"" + pt.result.substr(0, 48) + "\"");
+                std::string extra;
+                if (pt.pending && pt.started)
+                    extra = " age=" + std::to_string(time(nullptr) - pt.started) + "s";
+                else if (pt.gateSkips)
+                    extra = " skips=" + std::to_string(pt.gateSkips);
+                messages.push_back(std::string("  ") + state + " x" + std::to_string(pt.retry) + " " + res + extra + " " + pt.testName);
+            }
+        }
+        return messages;
+    }
 
     if (param.empty())
     {
@@ -2266,7 +2415,7 @@ std::list<std::string> PlayerbotHolder::HandleRunTest(Player* master, const std:
     if (testNamePart[0] == '?')
     {
         listTests = true;
-        testNamePart = testNamePart.substr(2);
+        testNamePart = testNamePart.size() > 2 ? testNamePart.substr(2) : "";
     }
 
     std::transform(testNamePart.begin(), testNamePart.end(), testNamePart.begin(), ::tolower);
@@ -2293,6 +2442,23 @@ std::list<std::string> PlayerbotHolder::HandleRunTest(Player* master, const std:
     {
         messages.push_back("No tests matching '" + param + "' found");
         return messages;
+    }
+
+    if (!listTests && matchingTests.size() > 1)
+    {
+        std::vector<std::string> exact;
+        for (const auto& test : matchingTests)
+        {
+            std::string lowerTest = test;
+            std::transform(lowerTest.begin(), lowerTest.end(), lowerTest.begin(), ::tolower);
+            if (lowerTest == testNamePart)
+            {
+                exact.push_back(test);
+                break;
+            }
+        }
+        if (!exact.empty())
+            matchingTests = exact;
     }
 
     if (listTests)
@@ -2347,10 +2513,31 @@ void PlayerbotHolder::UpdatePendingTests(uint32 elapsed)
 {
     std::lock_guard<std::mutex> lock(testResultsMutex);
 
+    QueueWatchReport();
+
+    static constexpr uint32 maxActiveTestBots = 50;
+    uint32 activeTestBots = 0;
+    for (const auto& test : pendingTests)
+    {
+        if (test.pending && !test.completed)
+            activeTestBots += std::max<uint32>(1, test.expectedBotSpawnCount);
+    }
+
     for (auto& pt : pendingTests)
     {
         if (pt.pending)
+        {
+            if (!pt.started)
+                pt.started = time(nullptr);
+            else if (time(nullptr) - pt.started > 3600)
+            {
+                sLog.outError("[TestQueue] stale in-flight '%s' after %us with no report - force-completing", pt.testName.c_str(), uint32(time(nullptr) - pt.started));
+                pt.result = "FAILED: stale in-flight, no test report";
+                pt.completed = true;
+                testResults.push_back(pt);
+            }
             continue;
+        }
 
         if (pt.completed)
             continue;
@@ -2364,29 +2551,62 @@ void PlayerbotHolder::UpdatePendingTests(uint32 elapsed)
 
         if (dynamic_cast<PlayerbotMgr*>(this))
         {
+            Player* master = (dynamic_cast<PlayerbotMgr*>(this))->GetMaster();
+            if (!master)
+            {
+                if (++pt.gateSkips == 1 || pt.gateSkips % 30 == 0)
+                    sLog.outError("[TestQueue] picker gate: no master, skip %u for '%s'", pt.gateSkips, pt.testName.c_str());
+                if (pt.gateSkips >= 120)
+                {
+                    pt.result = "FAILED: picker found no master";
+                    pt.completed = true;
+                    testResults.push_back(pt);
+                }
+                continue;
+            }
+
             uint32 maxCharsPerAccount = 9;
 #ifdef MANGOSBOT_TWO
             maxCharsPerAccount = 10;
 #endif
-            uint32 accountId = sObjectMgr.GetPlayerAccountIdByGUID((dynamic_cast<PlayerbotMgr*>(this))->GetMaster()->GetObjectGuid());
-                if (accountId == 0) continue;
+            uint32 accountId = sObjectMgr.GetPlayerAccountIdByGUID(master->GetObjectGuid());
+            if (accountId == 0)
+            {
+                if (++pt.gateSkips == 1 || pt.gateSkips % 30 == 0)
+                    sLog.outError("[TestQueue] picker gate: master account unknown, skip %u for '%s'", pt.gateSkips, pt.testName.c_str());
+                if (pt.gateSkips >= 120)
+                {
+                    pt.result = "FAILED: master account not resolvable";
+                    pt.completed = true;
+                    testResults.push_back(pt);
+                }
+                continue;
+            }
 
             uint32 currentChars = sAccountMgr.GetCharactersCount(accountId);
             if (currentChars >= maxCharsPerAccount)
+            {
+                if (++pt.gateSkips == 1 || pt.gateSkips % 30 == 0)
+                    sLog.outError("[TestQueue] picker gate: account %u full (%u chars), skip %u for '%s'", accountId, currentChars, pt.gateSkips, pt.testName.c_str());
+                if (pt.gateSkips >= 120)
+                {
+                    pt.result = "FAILED: master account full";
+                    pt.completed = true;
+                    testResults.push_back(pt);
+                }
                 continue;
-        }
-
-        static constexpr uint32 maxActiveTestBots = 50;
-        uint32 activeTestBots = 0;
-        for (const auto& test : pendingTests)
-        {
-            if (test.pending && !test.completed)
-                activeTestBots += std::max<uint32>(1, test.expectedBotSpawnCount);
+            }
         }
 
         uint32 newTestBotCount = std::max<uint32>(1, pt.expectedBotSpawnCount);
         if (activeTestBots + newTestBotCount >= maxActiveTestBots)
+        {
+            if (++pt.gateSkips == 1 || pt.gateSkips % 30 == 0)
+                sLog.outError("[TestQueue] picker gate: capacity %u/%u active, skip %u for '%s'", activeTestBots, maxActiveTestBots, pt.gateSkips, pt.testName.c_str());
             continue;
+        }
+
+        pt.gateSkips = 0;
 
         std::string createParams = TestRegistry::GetBotCreationRequirement(pt.testName);
 
@@ -2394,8 +2614,65 @@ void PlayerbotHolder::UpdatePendingTests(uint32 elapsed)
 
         std::list<std::string> createMsgs = HandleCreate(nullptr, createParams, SEC_PLAYER);
 
-        pt.pending = true;
+        bool created = false;
+        for (auto const& msg : createMsgs)
+        {
+            if (msg.find("Bot created: ") == 0)
+            {
+                created = true;
+                break;
+            }
+        }
+
+        if (created)
+        {
+            pt.pending = true;
+            pt.started = time(nullptr);
+            activeTestBots += newTestBotCount;
+        }
+        else if (++pt.retry >= 20)
+        {
+            pt.result = "FAILED: host bot creation failed";
+            pt.completed = true;
+            testResults.push_back(pt);
+        }
+        else if (pt.retry == 1 || pt.retry == 10 || pt.retry == 19)
+        {
+            std::string firstError;
+            for (auto const& msg : createMsgs)
+            {
+                if (!msg.empty() && msg.find("Bot created: ") != 0)
+                {
+                    firstError = msg;
+                    break;
+                }
+            }
+            sLog.outError("[TestQueue] create attempt %u for '%s' failed: %s", pt.retry, pt.testName.c_str(), firstError.c_str());
+        }
     }
+}
+
+void PlayerbotHolder::QueueWatchReport()
+{
+    static time_t last = 0;
+    time_t now = time(nullptr);
+    if (last && now - last < 60)
+        return;
+    last = now;
+
+    uint32 waiting = 0, inflight = 0, finished = 0;
+    for (const auto& pt : pendingTests)
+    {
+        if (pt.completed)
+            ++finished;
+        else if (pt.pending)
+            ++inflight;
+        else
+            ++waiting;
+    }
+
+    if (waiting)
+        sLog.outString("[TestQueue] waiting=%u in-flight=%u finished=%u (pending tests not starting)", waiting, inflight, finished);
 }
 
 void PlayerbotHolder::DepositTestResult(const std::string& testName, const std::string& result)
@@ -2413,8 +2690,8 @@ void PlayerbotHolder::DepositTestResult(const std::string& testName, const std::
             if (result == "ABORT") //Failed this time but might work next time.
             {
                 pt.result = result;
-                pt.retry++;
-                break;
+                if (++pt.retry < 3)
+                    break;
             }
 
             pt.result = result;

@@ -12,7 +12,7 @@
 
 using namespace ai;
 
-Unit* GrindTargetValue::Calculate()
+ObjectGuid GrindTargetValue::Calculate()
 {
     uint32 memberCount = 1;
     Group* group = bot->GetGroup();
@@ -26,7 +26,7 @@ Unit* GrindTargetValue::Calculate()
         target = FindTargetForGrinding(assistCount++);
     }
 
-    return target;
+    return target ? target->GetObjectGuid() : ObjectGuid();
 }
 
 Unit* GrindTargetValue::FindTargetForGrinding(int assistCount)
@@ -258,6 +258,14 @@ Unit* GrindTargetValue::FindTargetForGrinding(int assistCount)
             }
         }
 
+        if (needForQuest)
+        {
+            if (ai->HasStrategy("debug grind", BotState::BOT_STATE_NON_COMBAT))
+                ai->TellPlayer(GetMaster(), chat->formatWorldobject(unit) + " reduced distance (needed for active quest objective).");
+
+            newdistance *= 0.5f;
+        }
+
         if (!bot->InBattleGround() && GetTargetingPlayerCount(unit) > assistCount)
         {
             if (ai->HasStrategy("debug grind", BotState::BOT_STATE_NON_COMBAT))
@@ -275,10 +283,13 @@ Unit* GrindTargetValue::FindTargetForGrinding(int assistCount)
                 if (!member || !sServerFacade.IsAlive(member))
                     continue;
 
-                newdistance = sServerFacade.GetDistance2d(member, unit);
-                if (!result || newdistance < distance)
+                float memberDistance = sServerFacade.GetDistance2d(member, unit);
+                if (needForQuest)
+                    memberDistance *= 0.5f;
+
+                if (!result || memberDistance < distance)
                 {
-                    distance = newdistance;
+                    distance = memberDistance;
                     result = unit;
                 }
             }
@@ -323,7 +334,7 @@ int GrindTargetValue::GetTargetingPlayerCount( Unit* unit )
             continue;
 
         PlayerbotAI* ai = member->GetPlayerbotAI();
-        if ((ai && *ai->GetAiObjectContext()->GetValue<Unit*>("current target") == unit) ||
+        if ((ai && ai->GetAiObjectContext()->GetValue<ObjectGuid>("current target")->Get() == unit->GetObjectGuid()) ||
             (!ai && member->GetSelectionGuid() == unit->GetObjectGuid()))
             count++;
     }

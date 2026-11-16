@@ -2,6 +2,7 @@
 #include "playerbot/playerbot.h"
 #include "LootTriggers.h"
 #include "playerbot/LootObjectStack.h"
+#include "playerbot/strategy/values/FreeMoveValues.h"
 
 #include "playerbot/ServerFacade.h"
 using namespace ai;
@@ -22,6 +23,12 @@ bool FarFromCurrentLootTrigger::IsActive()
 
     if (!loot.IsLootPossible(bot))
         return false;
+
+    if (WorldObject* wo = loot.GetWorldObject(bot))
+    {
+        if (!CanFreeMoveValue::CanFreeMoveTo(ai, WorldPosition(wo)))
+            return false;
+    }
 
     return !LootObject::IsWithinLootRange(bot, loot.GetWorldObject(bot));
 }
